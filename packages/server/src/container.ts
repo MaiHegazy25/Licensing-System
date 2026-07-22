@@ -21,10 +21,13 @@ import {
   InMemoryRevocationRepository,
 } from "./infrastructure/persistence/memory.js";
 import type { Clock } from "./application/ports.js";
+import { ApiKeyPrincipalResolver } from "./infrastructure/auth/api-key-resolver.js";
+import type { PrincipalResolver } from "./application/auth.js";
 
 export interface Container {
   service: LicensingService;
   keyProvider: SigningKeyProvider;
+  principals: PrincipalResolver;
   config: AppConfig;
   audit: InMemoryAuditRepository;
 }
@@ -69,5 +72,7 @@ export function buildContainer(
     tokenIssuer,
   });
 
-  return { service, keyProvider, config: cfg, audit };
+  const principals = ApiKeyPrincipalResolver.fromEnv();
+
+  return { service, keyProvider, principals, config: cfg, audit };
 }

@@ -132,8 +132,9 @@ endpoints exist today (`/health`, `/ready`).
 | SDK (init/activate/validate/hasFeature/offline/rollback) | ✅ implemented + tested |
 | In-memory repositories | ✅ (used by demo + tests) |
 | Admin portal (React SPA) + read/mgmt API | ✅ products/licenses/detail/suspend/resume/renew/revoke/audit + tests |
+| RBAC — five roles, permission matrix, per-endpoint enforcement | ✅ implemented + tested (see ADR-0005) |
 | Postgres adapters wired end-to-end | ⏳ schema written; adapter wiring planned |
-| OIDC/RBAC auth (Entra ID/Keycloak) | ⏳ minimal admin key today |
+| OIDC auth (Entra ID/Keycloak) behind auth port | ⏳ API-key resolver today; OIDC resolver planned |
 | Offline file req/resp, trials, transfer | ⏳ planned (P3) |
 | Floating leases (atomic checkout) | ⏳ schema ready; logic planned (P4) |
 | Customer portal | ⏳ planned (P5) |

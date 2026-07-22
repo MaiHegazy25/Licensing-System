@@ -84,6 +84,20 @@ export interface CreateLicenseInput {
   offlineUntil?: number | null;
 }
 
+export type Role =
+  | "system_admin" | "license_admin" | "sales_ops" | "support" | "auditor";
+
+export type Permission =
+  | "product:read" | "product:write" | "license:read" | "license:create"
+  | "license:manage" | "license:revoke" | "activation:issue" | "audit:read"
+  | "system:admin";
+
+export interface Identity {
+  subject: string;
+  role: Role;
+  permissions: Permission[];
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -139,9 +153,10 @@ export class AdminApi {
     return payload as T;
   }
 
-  // Auth probe: any authenticated GET; used by the login form to validate the key.
-  async checkAuth(): Promise<void> {
-    await this.request("GET", "/api/v1/admin/products");
+  // Identity: who the caller is and what they may do. Also used as the auth
+  // probe by the login form (works for every role, unlike a permissioned read).
+  me(): Promise<Identity> {
+    return this.request("GET", "/api/v1/admin/me");
   }
 
   listProducts(): Promise<{ items: Product[] }> {

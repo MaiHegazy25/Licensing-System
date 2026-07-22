@@ -74,11 +74,28 @@ npm run dev -w @vehiclevo/licensing-admin-web   # http://localhost:5173
 npm run build -w @vehiclevo/licensing-admin-web # production bundle
 ```
 
-Auth for the slice is the admin API key (entered at login, held in
-sessionStorage, sent as a Bearer token, never logged). Production replaces this
-with SSO (Entra ID / Keycloak) + the five RBAC roles. The backend adds the
-matching read/management endpoints under `/api/v1/admin/*` with CORS for the SPA
-origin (`ADMIN_WEB_ORIGIN`).
+### RBAC — five roles
+
+The five roles from the brief are enforced server-side via a permission matrix
+(`domain/rbac.ts`; see ADR-0005). Every admin endpoint requires a specific
+permission; the portal fetches `/api/v1/admin/me` and hides controls the role
+can't use (the server stays the enforcer). The acting user is recorded in the
+audit trail.
+
+| Role | Can |
+|---|---|
+| `system_admin` | everything, incl. system config |
+| `license_admin` | full license lifecycle (create/manage/revoke), products, codes, audit |
+| `sales_ops` | create licenses, issue activation codes, read |
+| `support` | issue codes (activation reset), read |
+| `auditor` | read + audit only (no writes) |
+
+Auth for the slice is API keys mapped to roles (`ADMIN_API_KEY` legacy →
+system_admin, or `ADMIN_API_KEYS` JSON for roled keys), entered at login, held
+in sessionStorage, sent as a Bearer token, never logged. **Production** swaps the
+API-key resolver for an OIDC (Entra ID / Keycloak) resolver behind the same
+`PrincipalResolver` port — routes and matrix unchanged. Backend endpoints live
+under `/api/v1/admin/*` with CORS for the SPA origin (`ADMIN_WEB_ORIGIN`).
 
 ## SDK integration examples
 

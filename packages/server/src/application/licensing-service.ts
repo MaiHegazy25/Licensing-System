@@ -81,7 +81,7 @@ export interface ValidationResult {
 export class LicensingService {
   constructor(private readonly d: LicensingServiceDeps) {}
 
-  async createProduct(input: { key: string; name: string }): Promise<Product> {
+  async createProduct(input: { key: string; name: string }, actor = "admin"): Promise<Product> {
     const existing = await this.d.products.getByKey(input.key);
     if (existing) {
       throw new DomainError("VALIDATION", `product key '${input.key}' already exists`);
@@ -97,14 +97,14 @@ export class LicensingService {
       id: this.d.ids.next("evt"),
       type: "product.created",
       licenseId: null,
-      actor: "admin",
+      actor,
       at: product.createdAt,
       metadata: { productKey: product.key },
     });
     return product;
   }
 
-  async createLicense(input: CreateLicenseInput): Promise<License> {
+  async createLicense(input: CreateLicenseInput, actor = "admin"): Promise<License> {
     const product = await this.d.products.get(input.productId);
     if (!product) throw new DomainError("NOT_FOUND", "product not found");
     if (input.maximumSeats < 1) {
@@ -135,7 +135,7 @@ export class LicensingService {
       id: this.d.ids.next("evt"),
       type: "license.created",
       licenseId: license.id,
-      actor: "admin",
+      actor,
       at: now,
       metadata: { productId: license.productId, edition: license.edition },
     });
@@ -146,6 +146,7 @@ export class LicensingService {
   async generateActivationCode(
     licenseId: string,
     maxActivations = 1,
+    actor = "admin",
   ): Promise<{ activationCode: string; record: ActivationCodeRecord }> {
     const license = await this.d.licenses.get(licenseId);
     if (!license) throw new DomainError("NOT_FOUND", "license not found");
@@ -165,7 +166,7 @@ export class LicensingService {
       id: this.d.ids.next("evt"),
       type: "activation_code.generated",
       licenseId,
-      actor: "admin",
+      actor,
       at: record.createdAt,
       metadata: { maxActivations },
     });
