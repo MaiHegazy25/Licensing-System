@@ -126,6 +126,7 @@ endpoints exist today (`/health`, `/ready`).
 | Area | Status |
 |---|---|
 | Canonical serialization + Ed25519 sign/verify | ✅ implemented + tested |
+| Signing key custody: local (dev) + KMS/HSM provider (Azure Key Vault, EdDSA over REST) | ✅ implemented + tested; kid rotation; private keys never in-process |
 | License state machine + core use cases | ✅ implemented + tested |
 | Activation code gen/hash (HMAC + pepper) | ✅ implemented + tested |
 | HTTP API (activate/validate/admin/revoke) | ✅ implemented + tested |

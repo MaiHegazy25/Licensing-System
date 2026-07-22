@@ -208,7 +208,10 @@ See `packages/shared/src/token.ts` (`LicenseClaims`). Highlights: `schemaVersion
 ## Security posture (implemented)
 
 - Ed25519 signatures; canonical JSON payload; `kid`-based rotation support.
-- Private keys never in client or repo; `local` provider blocked in production.
+- Private keys never in client or repo; `local` provider blocked in production;
+  **KMS/HSM provider** (Azure Key Vault, EdDSA over REST) signs in the vault so
+  private keys never enter the process (`SIGNING_PROVIDER=kms`), with `kid`
+  rotation.
 - Activation codes: high-entropy, HMAC(pepper) hashed at rest, use-limited,
   constant-time compare.
 - Fail-safe SDK; offline window + grace; clock-rollback detection.
