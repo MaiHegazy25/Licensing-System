@@ -6,7 +6,8 @@
   "workspaces": [
     "packages/shared",
     "packages/server",
-    "packages/sdk"
+    "packages/sdk",
+    "packages/admin-web"
   ],
   "scripts": {
     "build": "tsc --build",

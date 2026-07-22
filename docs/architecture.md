@@ -131,9 +131,10 @@ endpoints exist today (`/health`, `/ready`).
 | HTTP API (activate/validate/admin/revoke) | ✅ implemented + tested |
 | SDK (init/activate/validate/hasFeature/offline/rollback) | ✅ implemented + tested |
 | In-memory repositories | ✅ (used by demo + tests) |
+| Admin portal (React SPA) + read/mgmt API | ✅ products/licenses/detail/suspend/resume/renew/revoke/audit + tests |
 | Postgres adapters wired end-to-end | ⏳ schema written; adapter wiring planned |
 | OIDC/RBAC auth (Entra ID/Keycloak) | ⏳ minimal admin key today |
 | Offline file req/resp, trials, transfer | ⏳ planned (P3) |
 | Floating leases (atomic checkout) | ⏳ schema ready; logic planned (P4) |
-| Admin + customer portals | ⏳ planned (P5) |
+| Customer portal | ⏳ planned (P5) |
 | Reporting, key rotation runbook, monitoring | ⏳ planned (P6) |

@@ -30,6 +30,15 @@ export interface ProductRepository {
   create(p: Product): Promise<void>;
   get(id: string): Promise<Product | null>;
   getByKey(key: string): Promise<Product | null>;
+  list(): Promise<Product[]>;
+}
+
+export interface LicenseQuery {
+  customerId?: string;
+  productId?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface LicenseRepository {
@@ -37,6 +46,7 @@ export interface LicenseRepository {
   get(id: string): Promise<License | null>;
   /** Persist with optimistic concurrency; throws on version mismatch. */
   update(l: License, expectedVersion: number): Promise<void>;
+  list(query: LicenseQuery): Promise<{ items: License[]; total: number }>;
 }
 
 export interface ActivationCodeRepository {
@@ -44,6 +54,7 @@ export interface ActivationCodeRepository {
   get(id: string): Promise<ActivationCodeRecord | null>;
   findByHash(hash: string): Promise<ActivationCodeRecord | null>;
   update(r: ActivationCodeRecord): Promise<void>;
+  listByLicense(licenseId: string): Promise<ActivationCodeRecord[]>;
 }
 
 export interface ActivationRepository {
@@ -52,13 +63,21 @@ export interface ActivationRepository {
   countActive(licenseId: string): Promise<number>;
   findActiveByDevice(licenseId: string, deviceId: string): Promise<Activation | null>;
   update(a: Activation): Promise<void>;
+  listByLicense(licenseId: string): Promise<Activation[]>;
 }
 
 export interface RevocationRepository {
   add(r: Revocation): Promise<void>;
   isRevoked(licenseId: string): Promise<boolean>;
+  get(licenseId: string): Promise<Revocation | null>;
+}
+
+export interface AuditQuery {
+  licenseId?: string;
+  limit?: number;
 }
 
 export interface AuditRepository {
   append(e: AuditEvent): Promise<void>;
+  query(query: AuditQuery): Promise<AuditEvent[]>;
 }

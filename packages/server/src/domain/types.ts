@@ -51,7 +51,9 @@ export type AuditEventType =
   | "license.activated"
   | "license.validated"
   | "license.revoked"
-  | "license.suspended";
+  | "license.suspended"
+  | "license.resumed"
+  | "license.renewed";
 
 export interface AuditEvent {
   id: string;
