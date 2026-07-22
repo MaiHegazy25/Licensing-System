@@ -8,11 +8,21 @@
 import {
   sign as nodeSign,
   verify as nodeVerify,
+  createHash,
   createPublicKey,
   createPrivateKey,
   generateKeyPairSync,
   type KeyObject,
 } from "node:crypto";
+
+/**
+ * Stable, non-reversible binding value for a device id. Computed identically on
+ * the server (when issuing a device-bound/offline token) and in the SDK (when
+ * checking a token belongs to this device). Not a secret — just a binding.
+ */
+export function hashDeviceBinding(deviceId: string): string {
+  return createHash("sha256").update(`vv-device:${deviceId}`).digest("hex");
+}
 
 export function publicKeyFromPem(pem: string): KeyObject {
   return createPublicKey(pem);

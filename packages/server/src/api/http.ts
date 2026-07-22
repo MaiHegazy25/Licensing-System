@@ -1,14 +1,16 @@
 /**
  * HTTP API (Fastify). Thin transport layer over the LicensingService.
  *
- * AuthN/Z here is intentionally minimal for the vertical slice: admin routes
- * require a bearer token compared in constant time against ADMIN_API_KEY.
- * PRODUCTION replaces this with OIDC (Entra ID / Keycloak) + the five RBAC
- * roles from the brief — the guard is isolated so that swap is localized.
+ * AuthN/Z: every admin route authenticates the bearer token to a Principal
+ * (subject + role) via the PrincipalResolver, then authorizes a specific
+ * Permission against the role. The API-key resolver is the dev/slice adapter;
+ * PRODUCTION swaps in an OIDC-token resolver behind the same port — routes and
+ * the permission matrix are unchanged.
  */
-import { timingSafeEqual } from "node:crypto";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
+import { permissionsForRole, roleHasPermission, type Permission } from "../domain/rbac.js";
+import type { Principal, CustomerPrincipal } from "../application/auth.js";
 import type { Container } from "../container.js";
 
 const HTTP_FOR_CODE: Record<DomainErrorCode, number> = {
@@ -18,6 +20,7 @@ const HTTP_FOR_CODE: Record<DomainErrorCode, number> = {
   ACTIVATION_CODE_CONSUMED: 409,
   SEAT_LIMIT_REACHED: 409,
   LICENSE_NOT_ACTIVE: 403,
+  LEASE_NOT_FOUND: 409,
   VALIDATION: 400,
 };
 
@@ -27,10 +30,10 @@ function bearer(req: FastifyRequest): string | null {
   return h.slice("Bearer ".length);
 }
 
-function constantTimeEquals(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
+function httpError(statusCode: number, message: string): Error {
+  const e = new Error(message);
+  (e as { statusCode?: number }).statusCode = statusCode;
+  return e;
 }
 
 export function buildHttpServer(container: Container): FastifyInstance {
@@ -56,18 +59,26 @@ export function buildHttpServer(container: Container): FastifyInstance {
     },
   );
 
-  const adminKey = process.env.ADMIN_API_KEY ?? "";
+  // Authenticate a request to a Principal (401 if unknown / unconfigured).
+  const authenticate = async (req: FastifyRequest): Promise<Principal> => {
+    if (!container.principals.isConfigured()) {
+      throw new DomainError(
+        "VALIDATION",
+        "admin auth not configured (set ADMIN_API_KEY/ADMIN_API_KEYS or AUTH_MODE=oidc)",
+      );
+    }
+    const principal = await container.principals.resolve(bearer(req));
+    if (!principal) throw httpError(401, "unauthorized");
+    return principal;
+  };
 
-  const requireAdmin = async (req: FastifyRequest): Promise<void> => {
-    if (!adminKey) {
-      throw new DomainError("VALIDATION", "admin auth not configured (set ADMIN_API_KEY)");
+  // Authenticate + require a specific permission (403 if the role lacks it).
+  const authorize = async (req: FastifyRequest, permission: Permission): Promise<Principal> => {
+    const principal = await authenticate(req);
+    if (!roleHasPermission(principal.role, permission)) {
+      throw httpError(403, `forbidden: requires '${permission}'`);
     }
-    const token = bearer(req);
-    if (!token || !constantTimeEquals(token, adminKey)) {
-      const e = new Error("unauthorized");
-      (e as { statusCode?: number }).statusCode = 401;
-      throw e;
-    }
+    return principal;
   };
 
   // CORS for the admin SPA (dev serves it on a different origin). The allowed
@@ -92,9 +103,9 @@ export function buildHttpServer(container: Container): FastifyInstance {
     const status = (err as { statusCode?: number }).statusCode ?? 500;
     const message =
       status === 500 ? "internal error" : (err as { message?: string }).message ?? "error";
-    return reply
-      .code(status)
-      .send({ error: { code: status === 401 ? "UNAUTHORIZED" : "INTERNAL", message } });
+    const code =
+      status === 401 ? "UNAUTHORIZED" : status === 403 ? "FORBIDDEN" : "INTERNAL";
+    return reply.code(status).send({ error: { code, message } });
   });
 
   // --- Health / readiness ---
@@ -107,72 +118,87 @@ export function buildHttpServer(container: Container): FastifyInstance {
     return { activeKeyId: container.keyProvider.trustedKeyIds()[0], trustedKeyIds: container.keyProvider.trustedKeyIds() };
   });
 
+  // --- Admin: identity (who am I + what can I do) ---
+  app.get("/api/v1/admin/me", async (req, reply) => {
+    const principal = await authenticate(req);
+    return reply.send({
+      subject: principal.subject,
+      role: principal.role,
+      permissions: permissionsForRole(principal.role),
+    });
+  });
+
   // --- Admin: products ---
   app.post("/api/v1/admin/products", async (req, reply) => {
-    await requireAdmin(req);
+    const principal = await authorize(req, "product:write");
     const body = req.body as { key: string; name: string };
-    const product = await container.service.createProduct(body);
+    const product = await container.service.createProduct(body, principal.subject);
     return reply.code(201).send(product);
   });
 
   // --- Admin: licenses ---
   app.post("/api/v1/admin/licenses", async (req, reply) => {
-    await requireAdmin(req);
-    const license = await container.service.createLicense(req.body as never);
+    const principal = await authorize(req, "license:create");
+    const license = await container.service.createLicense(req.body as never, principal.subject);
     return reply.code(201).send(license);
   });
 
   app.post("/api/v1/admin/licenses/:id/activation-codes", async (req, reply) => {
-    await requireAdmin(req);
+    const principal = await authorize(req, "activation:issue");
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { maxActivations?: number };
     const { activationCode, record } = await container.service.generateActivationCode(
       id,
       body.maxActivations ?? 1,
+      principal.subject,
     );
     // The plaintext code is returned ONCE and must never be logged.
     return reply.code(201).send({ activationCode, activationCodeId: record.id });
   });
 
   app.post("/api/v1/admin/licenses/:id/revoke", async (req, reply) => {
-    await requireAdmin(req);
+    const principal = await authorize(req, "license:revoke");
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { reason?: string };
-    await container.service.revoke(id, body.reason ?? "revoked by admin");
+    await container.service.revoke(id, body.reason ?? "revoked by admin", principal.subject);
     return reply.code(204).send();
   });
 
   app.post("/api/v1/admin/licenses/:id/suspend", async (req, reply) => {
-    await requireAdmin(req);
+    const principal = await authorize(req, "license:manage");
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { reason?: string };
-    const license = await container.service.suspend(id, body.reason ?? "suspended by admin");
+    const license = await container.service.suspend(
+      id,
+      body.reason ?? "suspended by admin",
+      principal.subject,
+    );
     return reply.send(license);
   });
 
   app.post("/api/v1/admin/licenses/:id/resume", async (req, reply) => {
-    await requireAdmin(req);
+    const principal = await authorize(req, "license:manage");
     const { id } = req.params as { id: string };
-    const license = await container.service.resume(id);
+    const license = await container.service.resume(id, principal.subject);
     return reply.send(license);
   });
 
   app.post("/api/v1/admin/licenses/:id/renew", async (req, reply) => {
-    await requireAdmin(req);
+    const principal = await authorize(req, "license:manage");
     const { id } = req.params as { id: string };
     const body = req.body as { expiresAt: number | null; maintenanceExpiresAt?: number | null };
-    const license = await container.service.renew(id, body);
+    const license = await container.service.renew(id, body, principal.subject);
     return reply.send(license);
   });
 
   // --- Admin: read side (portal) ---
   app.get("/api/v1/admin/products", async (req, reply) => {
-    await requireAdmin(req);
+    await authorize(req, "product:read");
     return reply.send({ items: await container.service.listProducts() });
   });
 
   app.get("/api/v1/admin/licenses", async (req, reply) => {
-    await requireAdmin(req);
+    await authorize(req, "license:read");
     const q = req.query as Record<string, string | undefined>;
     const result = await container.service.listLicenses({
       customerId: q.customerId,
@@ -185,13 +211,13 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   app.get("/api/v1/admin/licenses/:id", async (req, reply) => {
-    await requireAdmin(req);
+    await authorize(req, "license:read");
     const { id } = req.params as { id: string };
     return reply.send(await container.service.getLicenseDetail(id));
   });
 
   app.get("/api/v1/admin/audit", async (req, reply) => {
-    await requireAdmin(req);
+    await authorize(req, "audit:read");
     const q = req.query as { licenseId?: string };
     return reply.send({ items: await container.service.listAuditEvents(q.licenseId) });
   });
@@ -213,6 +239,89 @@ export function buildHttpServer(container: Container): FastifyInstance {
     const result = await container.service.validate(body);
     const code = result.status === "valid" ? 200 : 403;
     return reply.code(code).send(result);
+  });
+
+  // --- Client: offline activation (air-gapped) ---
+  // Accepts a signed-request file, returns a signed-response file. Public like
+  // /activate — the activation code in the request is the credential.
+  app.post("/api/v1/offline/response", async (req, reply) => {
+    const response = await container.service.generateOfflineResponse(req.body as never);
+    return reply
+      .header("content-disposition", `attachment; filename="offline-response-${response.requestId}.json"`)
+      .send(response);
+  });
+
+  // --- Client: floating (concurrent) seats ---
+  app.post("/api/v1/floating/checkout", async (req, reply) => {
+    const body = req.body as { licenseId: string; deviceId: string; deviceLabel?: string };
+    const result = await container.service.checkoutSeat({
+      licenseId: body.licenseId,
+      deviceId: body.deviceId,
+      deviceLabel: body.deviceLabel ?? null,
+    });
+    return reply.send(result);
+  });
+
+  app.post("/api/v1/floating/heartbeat", async (req, reply) => {
+    const body = req.body as { leaseId: string; deviceId: string };
+    return reply.send(await container.service.heartbeatSeat(body));
+  });
+
+  app.post("/api/v1/floating/return", async (req, reply) => {
+    const body = req.body as { leaseId: string; deviceId: string };
+    await container.service.returnSeat(body);
+    return reply.code(204).send();
+  });
+
+  // --- Customer portal (scoped to the authenticated customerId) ---
+  const authenticateCustomer = async (req: FastifyRequest): Promise<CustomerPrincipal> => {
+    if (!container.customerPrincipals.isConfigured()) {
+      throw new DomainError("VALIDATION", "customer auth not configured (set CUSTOMER_API_KEYS)");
+    }
+    const principal = await container.customerPrincipals.resolve(bearer(req));
+    if (!principal) throw httpError(401, "unauthorized");
+    return principal;
+  };
+
+  app.get("/api/v1/customer/me", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    return reply.send({ customerId: c.customerId, subject: c.subject });
+  });
+
+  app.get("/api/v1/customer/licenses", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const items = await container.service.getCustomerLicenses(c.customerId);
+    return reply.send({ items });
+  });
+
+  app.get("/api/v1/customer/licenses/:id", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const { id } = req.params as { id: string };
+    return reply.send(await container.service.getCustomerLicenseDetail(c.customerId, id));
+  });
+
+  app.post("/api/v1/customer/licenses/:id/devices/:activationId/deactivate", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const { id, activationId } = req.params as { id: string; activationId: string };
+    await container.service.deactivateDevice(c.customerId, id, activationId);
+    return reply.code(204).send();
+  });
+
+  app.post("/api/v1/customer/licenses/:id/activation-reset", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { note?: string };
+    await container.service.requestActivationReset(c.customerId, id, body.note ?? "");
+    return reply.code(202).send({ status: "requested" });
+  });
+
+  app.get("/api/v1/customer/licenses/:id/license-file", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const { id } = req.params as { id: string };
+    const file = await container.service.downloadLicenseFile(c.customerId, id);
+    return reply
+      .header("content-disposition", `attachment; filename="license-${id}.json"`)
+      .send(file);
   });
 
   return app;

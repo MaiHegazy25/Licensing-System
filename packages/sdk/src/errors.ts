@@ -14,6 +14,11 @@ export enum LicensingErrorCode {
   Network = "NETWORK",
   FeatureNotLicensed = "FEATURE_NOT_LICENSED",
   NotSupported = "NOT_SUPPORTED",
+  SeatUnavailable = "SEAT_UNAVAILABLE",
+  LeaseExpired = "LEASE_EXPIRED",
+  NoActiveLease = "NO_ACTIVE_LEASE",
+  DeviceMismatch = "DEVICE_MISMATCH",
+  OfflineFileInvalid = "OFFLINE_FILE_INVALID",
 }
 
 /** Human-friendly messages — safe to surface to end users. */
@@ -32,6 +37,11 @@ const MESSAGES: Record<LicensingErrorCode, string> = {
   [LicensingErrorCode.Network]: "Could not reach the licensing server.",
   [LicensingErrorCode.FeatureNotLicensed]: "This feature is not included in your license.",
   [LicensingErrorCode.NotSupported]: "This operation is not supported by your license type.",
+  [LicensingErrorCode.SeatUnavailable]: "All concurrent seats are currently in use. Please try again shortly.",
+  [LicensingErrorCode.LeaseExpired]: "Your concurrent seat has expired. Reconnecting…",
+  [LicensingErrorCode.NoActiveLease]: "No concurrent seat is currently checked out.",
+  [LicensingErrorCode.DeviceMismatch]: "This license file was issued for a different device.",
+  [LicensingErrorCode.OfflineFileInvalid]: "The offline activation file is invalid or corrupted.",
 };
 
 export class LicensingError extends Error {

@@ -39,6 +39,20 @@ describe("AdminApi", () => {
     });
   });
 
+  it("fetches identity (role + permissions) via me()", async () => {
+    const fetchImpl = mockFetch(200, {
+      subject: "alice",
+      role: "auditor",
+      permissions: ["license:read", "audit:read"],
+    });
+    const api = new AdminApi({ getToken: () => "k", fetchImpl });
+    const id = await api.me();
+    expect(id.role).toBe("auditor");
+    expect(id.permissions).toContain("audit:read");
+    const [url] = fetchImpl.mock.calls[0]!;
+    expect(url).toContain("/api/v1/admin/me");
+  });
+
   it("handles 204 No Content (revoke)", async () => {
     const fetchImpl = mockFetch(204, null);
     const api = new AdminApi({ getToken: () => "k", fetchImpl });

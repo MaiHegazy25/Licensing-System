@@ -8,9 +8,10 @@ import { AuditLog } from "./views/Audit";
 type Tab = "licenses" | "products" | "audit";
 
 export function App() {
-  const { isAuthed, logout } = useAuth();
+  const { isAuthed, loading, identity, can, logout } = useAuth();
   const [tab, setTab] = useState<Tab>("licenses");
 
+  if (loading) return <div className="login"><div className="muted">Loading…</div></div>;
   if (!isAuthed) return <Login />;
 
   return (
@@ -24,10 +25,13 @@ export function App() {
           <button className={tab === "products" ? "active" : ""} onClick={() => setTab("products")}>
             Products
           </button>
-          <button className={tab === "audit" ? "active" : ""} onClick={() => setTab("audit")}>
-            Audit
-          </button>
+          {can("audit:read") && (
+            <button className={tab === "audit" ? "active" : ""} onClick={() => setTab("audit")}>
+              Audit
+            </button>
+          )}
         </nav>
+        <span className="role-chip" title={identity?.subject}>{identity?.role}</span>
         <button className="link" onClick={logout}>
           Log out
         </button>
@@ -35,7 +39,7 @@ export function App() {
       <main className="content">
         {tab === "licenses" && <Licenses />}
         {tab === "products" && <Products />}
-        {tab === "audit" && <AuditLog />}
+        {tab === "audit" && can("audit:read") && <AuditLog />}
       </main>
     </div>
   );

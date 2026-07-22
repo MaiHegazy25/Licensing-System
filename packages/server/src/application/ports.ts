@@ -4,6 +4,9 @@ import type {
   ActivationCodeRecord,
   Activation,
   AuditEvent,
+  FloatingLease,
+  OfflineRequestRecord,
+  OfflineResponseRecord,
   Product,
   Revocation,
 } from "../domain/types.js";
@@ -64,12 +67,57 @@ export interface ActivationRepository {
   findActiveByDevice(licenseId: string, deviceId: string): Promise<Activation | null>;
   update(a: Activation): Promise<void>;
   listByLicense(licenseId: string): Promise<Activation[]>;
+  /**
+   * Atomically create the activation ONLY if the license's active-seat count is
+   * below `maxSeats`. Returns true if created, false if the seat cap would be
+   * exceeded. Must be race-free under concurrency (SQL conditional insert /
+   * row lock in Postgres) so the system never issues more seats than allowed.
+   */
+  createIfUnderSeatLimit(a: Activation, maxSeats: number): Promise<boolean>;
 }
 
 export interface RevocationRepository {
   add(r: Revocation): Promise<void>;
   isRevoked(licenseId: string): Promise<boolean>;
   get(licenseId: string): Promise<Revocation | null>;
+}
+
+export interface AcquireLeaseParams {
+  id: string;
+  licenseId: string;
+  deviceId: string;
+  deviceLabel: string | null;
+  now: number;
+  ttlSeconds: number;
+  maxSeats: number;
+}
+
+export interface FloatingLeaseRepository {
+  /**
+   * Atomically acquire (or renew, if this device already holds one) a concurrent
+   * seat. Returns the granted lease, or null if the license is already at its
+   * concurrent-seat cap. MUST be race-free under concurrency so the cap is never
+   * exceeded (Postgres uses a license row lock).
+   */
+  acquire(params: AcquireLeaseParams): Promise<FloatingLease | null>;
+  /** Extend an active lease; returns the updated lease, or null if it is no longer active. */
+  heartbeat(params: {
+    leaseId: string;
+    deviceId: string;
+    now: number;
+    ttlSeconds: number;
+  }): Promise<FloatingLease | null>;
+  /** Release a lease; returns true if it was active. Idempotent. */
+  release(leaseId: string, deviceId: string, now: number): Promise<boolean>;
+  countActive(licenseId: string, now: number): Promise<number>;
+  listActive(licenseId: string, now: number): Promise<FloatingLease[]>;
+}
+
+export interface OfflineRepository {
+  /** Returns the already-issued response for a requestId (idempotency/replay). */
+  getResponse(requestId: string): Promise<OfflineResponseRecord | null>;
+  /** Persist the request + its issued response together. */
+  save(request: OfflineRequestRecord, response: OfflineResponseRecord): Promise<void>;
 }
 
 export interface AuditQuery {

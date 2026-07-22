@@ -8,6 +8,15 @@ export interface IssuedToken {
   expiresAt: number | null;
 }
 
+export interface IssueOptions {
+  /** Bind the token to a device (hashed). null/omitted = not device-bound. */
+  deviceBinding?: string | null;
+  /** Override the token's own expiry (e.g. long-lived offline tokens). */
+  expiresAtOverride?: number | null;
+  /** Override the offline window. */
+  offlineUntilOverride?: number | null;
+}
+
 export interface TokenIssuer {
-  issue(license: License): Promise<IssuedToken>;
+  issue(license: License, opts?: IssueOptions): Promise<IssuedToken>;
 }

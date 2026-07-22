@@ -9,7 +9,7 @@ const LICENSE_TYPES: LicenseType[] = [
 ];
 
 export function Licenses() {
-  const { api } = useAuth();
+  const { api, can } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [licenses, setLicenses] = useState<License[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
@@ -44,9 +44,11 @@ export function Licenses() {
             <option value="expired">expired</option>
             <option value="revoked">revoked</option>
           </select>
-          <button className="primary" onClick={() => setCreating(true)} disabled={products.length === 0}>
-            New license
-          </button>
+          {can("license:create") && (
+            <button className="primary" onClick={() => setCreating(true)} disabled={products.length === 0}>
+              New license
+            </button>
+          )}
         </div>
       </div>
       {products.length === 0 && <div className="muted">Create a product first.</div>}

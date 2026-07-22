@@ -5,7 +5,7 @@ import {
 } from "@vehiclevo/licensing-shared";
 import type { License } from "../../domain/license.js";
 import type { Clock, IdGenerator } from "../../application/ports.js";
-import type { IssuedToken, TokenIssuer } from "../../application/token-issuer.js";
+import type { IssueOptions, IssuedToken, TokenIssuer } from "../../application/token-issuer.js";
 import type { SigningKeyProvider } from "./key-provider.js";
 
 const SCHEMA_VERSION = 1;
@@ -25,16 +25,20 @@ export class SigningTokenIssuer implements TokenIssuer {
     private readonly ids: IdGenerator,
   ) {}
 
-  async issue(license: License): Promise<IssuedToken> {
+  async issue(license: License, opts: IssueOptions = {}): Promise<IssuedToken> {
     const now = this.clock.now();
     const signer = this.keys.activeSigner();
 
-    // Token validity = min(license expiry, now + short TTL). The short TTL forces
-    // periodic re-validation so revocation propagates without waiting for license
-    // expiry. offlineUntil governs the longer no-contact window.
+    // Default token validity = min(license expiry, now + short TTL). The short TTL
+    // forces periodic re-validation so revocation propagates without waiting for
+    // license expiry. Offline tokens override this with a long-lived expiry.
     const ttlExpiry = now + this.cfg.tokenTtlSeconds;
     const tokenExpiresAt =
-      license.expiresAt === null ? ttlExpiry : Math.min(ttlExpiry, license.expiresAt);
+      opts.expiresAtOverride !== undefined
+        ? opts.expiresAtOverride
+        : license.expiresAt === null
+          ? ttlExpiry
+          : Math.min(ttlExpiry, license.expiresAt);
 
     const tokenId = this.ids.next("tok");
     const claims: LicenseClaims = {
@@ -52,8 +56,9 @@ export class SigningTokenIssuer implements TokenIssuer {
       expiresAt: tokenExpiresAt,
       maintenanceExpiresAt: license.maintenanceExpiresAt,
       maximumSeats: license.maximumSeats,
-      deviceBinding: null,
-      offlineUntil: license.offlineUntil,
+      deviceBinding: opts.deviceBinding ?? null,
+      offlineUntil:
+        opts.offlineUntilOverride !== undefined ? opts.offlineUntilOverride : license.offlineUntil,
       gracePeriodSeconds: license.gracePeriodSeconds,
       issuer: this.cfg.issuer,
       audience: this.cfg.audience,

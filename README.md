@@ -46,9 +46,21 @@ cp .env.example .env     # then set ACTIVE_SIGNING_KEY_ID + ACTIVATION_CODE_PEPP
 npm start -w @vehiclevo/licensing-server
 ```
 
-The vertical slice runs on in-memory repositories (zero external deps). The
-Postgres schema lives in `packages/server/migrations/001_init.sql`; the docker
-compose file provisions a local database.
+By default the server runs on **in-memory** repositories (zero external deps).
+Set `DATABASE_URL` to switch to **Postgres**: the server applies pending
+migrations on startup (idempotent, tracked in `schema_migrations`) and uses the
+`pg`-backed adapters. Seat checkout is enforced atomically with a
+`SELECT … FOR UPDATE` row lock, so concurrent activations can never oversell.
+
+```bash
+docker compose up -d db                 # local Postgres
+export DATABASE_URL=postgres://licensing:licensing@localhost:5432/licensing
+npm run migrate -w @vehiclevo/licensing-server   # or let startup auto-apply
+npm start -w @vehiclevo/licensing-server
+
+# Postgres integration tests (skipped unless a DB is provided):
+TEST_DATABASE_URL=$DATABASE_URL npm test
+```
 
 ## What the slice proves (Stage 3)
 
@@ -74,11 +86,56 @@ npm run dev -w @vehiclevo/licensing-admin-web   # http://localhost:5173
 npm run build -w @vehiclevo/licensing-admin-web # production bundle
 ```
 
-Auth for the slice is the admin API key (entered at login, held in
-sessionStorage, sent as a Bearer token, never logged). Production replaces this
-with SSO (Entra ID / Keycloak) + the five RBAC roles. The backend adds the
-matching read/management endpoints under `/api/v1/admin/*` with CORS for the SPA
-origin (`ADMIN_WEB_ORIGIN`).
+### RBAC — five roles
+
+The five roles from the brief are enforced server-side via a permission matrix
+(`domain/rbac.ts`; see ADR-0005). Every admin endpoint requires a specific
+permission; the portal fetches `/api/v1/admin/me` and hides controls the role
+can't use (the server stays the enforcer). The acting user is recorded in the
+audit trail.
+
+| Role | Can |
+|---|---|
+| `system_admin` | everything, incl. system config |
+| `license_admin` | full license lifecycle (create/manage/revoke), products, codes, audit |
+| `sales_ops` | create licenses, issue activation codes, read |
+| `support` | issue codes (activation reset), read |
+| `auditor` | read + audit only (no writes) |
+
+Authentication is selectable behind one `PrincipalResolver` port (`AUTH_MODE`):
+
+- **`apikey`** (default, dev): API keys mapped to roles — `ADMIN_API_KEY`
+  (legacy → system_admin) or `ADMIN_API_KEYS` JSON for roled keys. Entered at
+  login, held in sessionStorage, sent as a Bearer token, never logged.
+- **`oidc`** (production): validates IdP-issued JWT access tokens (Entra ID /
+  Keycloak) — RS256 signature checked against the IdP JWKS, `iss`/`aud`/`exp`
+  enforced, and the configured role/group claim mapped to our roles
+  (`OIDC_*` env). Uses Node's built-in crypto; no JWT library. `alg:none` and
+  non-RS256 tokens are rejected.
+
+Either way the **same permission matrix** enforces access; routes are unchanged.
+Backend endpoints live under `/api/v1/admin/*` with CORS for the SPA origin
+(`ADMIN_WEB_ORIGIN`).
+
+## Customer portal
+
+A separate React SPA (`packages/customer-web`) for end customers — no access to
+internal administration. Customers can view their licenses, enabled features,
+expiry/maintenance dates and seat usage; view and **deactivate their own
+devices** (freeing a seat, enabling transfer); **download a signed license
+file**; and **request an activation reset**.
+
+```bash
+npm run dev -w @vehiclevo/licensing-customer-web    # http://localhost:5174
+npm run build -w @vehiclevo/licensing-customer-web
+```
+
+The customer API lives under `/api/v1/customer/*` and is **strictly scoped to
+the authenticated customer** — every response is filtered to their `customerId`,
+and any attempt to read or act on another customer's license returns `404` (no
+existence leak). Auth for the slice is customer access keys (`CUSTOMER_API_KEYS`)
+behind a `CustomerPrincipalResolver` port; production swaps in a customer
+OIDC/B2C resolver. Isolation is covered by tests (`customer-api.test.ts`).
 
 ## SDK integration examples
 
@@ -105,6 +162,21 @@ if (!status.ok) showLicensingScreen(status);  // fails safe: features stay off
 setInterval(() => { void licensing.validateLicense(); }, 6 * 60 * 60 * 1000);
 ```
 
+### Floating (concurrent) seats
+```ts
+const seat = await licensing.checkoutSeat();        // throws SeatUnavailable if full
+const hb = setInterval(async () => {
+  try { await licensing.heartbeatSeat(); }          // keep the lease alive
+  catch { clearInterval(hb); await licensing.checkoutSeat(); } // reclaimed → re-checkout
+}, seat.expiresAt ? 60_000 : 60_000);
+// on shutdown:
+clearInterval(hb);
+await licensing.returnSeat();                        // free the seat immediately
+```
+A crashed client needs no cleanup — its lease expires and the seat is reclaimed
+automatically. Checkout is atomic server-side (license row lock), so the
+concurrent cap can never be exceeded even under parallel checkout.
+
 ### Feature gating (not a single bypassable gate — re-check at the call site)
 ```ts
 function exportPdf() {
@@ -124,6 +196,24 @@ try {
   showError((e as LicensingError).userMessage); // friendly, safe message
 }
 ```
+
+### Offline (air-gapped) activation
+```ts
+// 1) On the air-gapped machine — no network needed:
+const request = licensing.generateOfflineRequest(activationCode);
+writeFile("request.json", JSON.stringify(request));   // carry to a connected machine / portal
+
+// 2) A connected machine / the portal submits it:
+//    POST /api/v1/offline/response  -> downloads response.json (signed, device-bound)
+
+// 3) Back on the air-gapped machine — verified locally, still no network:
+const snap = await licensing.importOfflineResponse(JSON.parse(readFile("response.json")));
+if (snap.ok) enableApp();
+```
+The response embeds a signed, **device-bound** license token with a long
+`offlineUntil`, so the machine runs offline for the license term. Re-submitting
+the same request is idempotent (no extra seat), and a response file copied to a
+different device is rejected (`DeviceMismatch`).
 
 ### Logout / deactivate & graceful shutdown
 ```ts
@@ -151,7 +241,10 @@ See `packages/shared/src/token.ts` (`LicenseClaims`). Highlights: `schemaVersion
 ## Security posture (implemented)
 
 - Ed25519 signatures; canonical JSON payload; `kid`-based rotation support.
-- Private keys never in client or repo; `local` provider blocked in production.
+- Private keys never in client or repo; `local` provider blocked in production;
+  **KMS/HSM provider** (Azure Key Vault, EdDSA over REST) signs in the vault so
+  private keys never enter the process (`SIGNING_PROVIDER=kms`), with `kid`
+  rotation.
 - Activation codes: high-entropy, HMAC(pepper) hashed at rest, use-limited,
   constant-time compare.
 - Fail-safe SDK; offline window + grace; clock-rollback detection.

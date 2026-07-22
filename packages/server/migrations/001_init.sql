@@ -23,7 +23,8 @@ CREATE TABLE products (
   id            TEXT PRIMARY KEY,
   key           TEXT NOT NULL UNIQUE,
   name          TEXT NOT NULL,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  -- epoch seconds (BIGINT), consistent with licenses/activation_codes/audit.
+  created_at    BIGINT NOT NULL
 );
 
 CREATE TABLE product_versions (
@@ -56,8 +57,12 @@ CREATE TABLE edition_features (
 
 CREATE TABLE licenses (
   id                     TEXT PRIMARY KEY,
-  customer_id            TEXT NOT NULL REFERENCES customers(id),
-  organization_id        TEXT REFERENCES organizations(id),
+  -- customer_id / organization_id are plain TEXT for now: customer & org
+  -- management is a later phase. FKs to customers(id)/organizations(id) will be
+  -- (re-)added once those entities are created through the domain. product_id
+  -- IS managed today, so it keeps its FK.
+  customer_id            TEXT NOT NULL,
+  organization_id        TEXT,
   product_id             TEXT NOT NULL REFERENCES products(id),
   edition                TEXT NOT NULL,
   enabled_features       JSONB NOT NULL DEFAULT '[]'::jsonb,

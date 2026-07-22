@@ -9,16 +9,22 @@ import type {
   Activation,
   ActivationCodeRecord,
   AuditEvent,
+  FloatingLease,
+  OfflineRequestRecord,
+  OfflineResponseRecord,
   Product,
   Revocation,
 } from "../../domain/types.js";
 import type {
+  AcquireLeaseParams,
   ActivationCodeRepository,
   ActivationRepository,
   AuditQuery,
   AuditRepository,
+  FloatingLeaseRepository,
   LicenseQuery,
   LicenseRepository,
+  OfflineRepository,
   ProductRepository,
   RevocationRepository,
 } from "../../application/ports.js";
@@ -127,6 +133,16 @@ export class InMemoryActivationRepository implements ActivationRepository {
   async update(a: Activation): Promise<void> {
     this.byId.set(a.id, clone(a));
   }
+  async createIfUnderSeatLimit(a: Activation, maxSeats: number): Promise<boolean> {
+    // Single-threaded event loop: this check-then-insert is already atomic.
+    let active = 0;
+    for (const x of this.byId.values()) {
+      if (x.licenseId === a.licenseId && x.status === "active") active++;
+    }
+    if (active >= maxSeats) return false;
+    this.byId.set(a.id, clone(a));
+    return true;
+  }
   async listByLicense(licenseId: string): Promise<Activation[]> {
     return [...this.byId.values()]
       .filter((a) => a.licenseId === licenseId)
@@ -145,6 +161,86 @@ export class InMemoryRevocationRepository implements RevocationRepository {
   }
   async get(licenseId: string): Promise<Revocation | null> {
     return this.revoked.has(licenseId) ? clone(this.revoked.get(licenseId)!) : null;
+  }
+}
+
+export class InMemoryFloatingLeaseRepository implements FloatingLeaseRepository {
+  private byId = new Map<string, FloatingLease>();
+
+  private isActive(l: FloatingLease, now: number): boolean {
+    return l.releasedAt === null && l.expiresAt > now;
+  }
+
+  async acquire(p: AcquireLeaseParams): Promise<FloatingLease | null> {
+    // Single-threaded: reuse-or-count-or-insert is atomic here.
+    for (const l of this.byId.values()) {
+      if (l.licenseId === p.licenseId && l.deviceId === p.deviceId && this.isActive(l, p.now)) {
+        l.expiresAt = p.now + p.ttlSeconds; // renew existing device lease
+        return clone(l);
+      }
+    }
+    let active = 0;
+    for (const l of this.byId.values()) {
+      if (l.licenseId === p.licenseId && this.isActive(l, p.now)) active++;
+    }
+    if (active >= p.maxSeats) return null;
+    const lease: FloatingLease = {
+      id: p.id,
+      licenseId: p.licenseId,
+      deviceId: p.deviceId,
+      deviceLabel: p.deviceLabel,
+      acquiredAt: p.now,
+      expiresAt: p.now + p.ttlSeconds,
+      releasedAt: null,
+    };
+    this.byId.set(lease.id, clone(lease));
+    return clone(lease);
+  }
+
+  async heartbeat(p: {
+    leaseId: string;
+    deviceId: string;
+    now: number;
+    ttlSeconds: number;
+  }): Promise<FloatingLease | null> {
+    const l = this.byId.get(p.leaseId);
+    if (!l || l.deviceId !== p.deviceId || !this.isActive(l, p.now)) return null;
+    l.expiresAt = p.now + p.ttlSeconds;
+    return clone(l);
+  }
+
+  async release(leaseId: string, deviceId: string, now: number): Promise<boolean> {
+    const l = this.byId.get(leaseId);
+    if (!l || l.deviceId !== deviceId || l.releasedAt !== null) return false;
+    l.releasedAt = now;
+    return true;
+  }
+
+  async countActive(licenseId: string, now: number): Promise<number> {
+    let n = 0;
+    for (const l of this.byId.values()) {
+      if (l.licenseId === licenseId && this.isActive(l, now)) n++;
+    }
+    return n;
+  }
+
+  async listActive(licenseId: string, now: number): Promise<FloatingLease[]> {
+    return [...this.byId.values()]
+      .filter((l) => l.licenseId === licenseId && this.isActive(l, now))
+      .sort((a, b) => a.acquiredAt - b.acquiredAt)
+      .map(clone);
+  }
+}
+
+export class InMemoryOfflineRepository implements OfflineRepository {
+  private responses = new Map<string, OfflineResponseRecord>();
+  private requests = new Map<string, OfflineRequestRecord>();
+  async getResponse(requestId: string): Promise<OfflineResponseRecord | null> {
+    return this.responses.has(requestId) ? clone(this.responses.get(requestId)!) : null;
+  }
+  async save(request: OfflineRequestRecord, response: OfflineResponseRecord): Promise<void> {
+    this.requests.set(request.requestId, clone(request));
+    this.responses.set(response.requestId, clone(response));
   }
 }
 

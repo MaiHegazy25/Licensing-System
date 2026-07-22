@@ -13,7 +13,7 @@ export function LicenseDetail({
   onClose: () => void;
   onChanged: () => void;
 }) {
-  const { api } = useAuth();
+  const { api, can } = useAuth();
   const [detail, setDetail] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newCode, setNewCode] = useState<string | null>(null);
@@ -71,22 +71,29 @@ export function LicenseDetail({
         {error && <div className="error">{error}</div>}
 
         <div className="row wrap actions">
-          <GenerateCode onGenerate={async (max) => {
-            const res = await api.generateCode(l.id, max);
-            setNewCode(res.activationCode);
-            await refresh();
-          }} />
-          {l.status === "active" && (
+          {can("activation:issue") && (
+            <GenerateCode onGenerate={async (max) => {
+              const res = await api.generateCode(l.id, max);
+              setNewCode(res.activationCode);
+              await refresh();
+            }} />
+          )}
+          {can("license:manage") && l.status === "active" && (
             <button onClick={() => act(() => api.suspend(l.id, "suspended via portal"))}>Suspend</button>
           )}
-          {l.status === "suspended" && (
+          {can("license:manage") && l.status === "suspended" && (
             <button onClick={() => act(() => api.resume(l.id))}>Resume</button>
           )}
-          <RenewButton onRenew={(epoch) => act(() => api.renew(l.id, epoch))} />
-          {l.status !== "revoked" && (
+          {can("license:manage") && (
+            <RenewButton onRenew={(epoch) => act(() => api.renew(l.id, epoch))} />
+          )}
+          {can("license:revoke") && l.status !== "revoked" && (
             <button className="danger" onClick={() => {
               if (confirm("Revoke this license? This is permanent.")) act(() => api.revoke(l.id, "revoked via portal"));
             }}>Revoke</button>
+          )}
+          {!can("activation:issue") && !can("license:manage") && !can("license:revoke") && (
+            <span className="muted">Read-only access.</span>
           )}
         </div>
 
@@ -113,6 +120,28 @@ export function LicenseDetail({
             {detail.activations.length === 0 && <tr><td colSpan={5} className="muted">No devices activated.</td></tr>}
           </tbody>
         </table>
+
+        {(l.licenseType === "floating" || detail.floatingLeases.length > 0) && (
+          <>
+            <h4>Floating seats ({detail.floatingLeases.length} / {l.maximumSeats} checked out)</h4>
+            <table>
+              <thead><tr><th>Device</th><th>Label</th><th>Acquired</th><th>Lease expires</th></tr></thead>
+              <tbody>
+                {detail.floatingLeases.map((lease) => (
+                  <tr key={lease.id}>
+                    <td className="mono">{lease.deviceId.slice(0, 16)}…</td>
+                    <td>{lease.deviceLabel ?? "—"}</td>
+                    <td>{fmtDate(lease.acquiredAt)}</td>
+                    <td>{fmtDate(lease.expiresAt)}</td>
+                  </tr>
+                ))}
+                {detail.floatingLeases.length === 0 && (
+                  <tr><td colSpan={4} className="muted">No seats currently checked out.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </>
+        )}
 
         <h4>Activation codes</h4>
         <table>

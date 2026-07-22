@@ -4,7 +4,7 @@ import type { Product } from "../api";
 import { fmtDate } from "../util";
 
 export function Products() {
-  const { api } = useAuth();
+  const { api, can } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [key, setKey] = useState("");
   const [name, setName] = useState("");
@@ -37,13 +37,15 @@ export function Products() {
   return (
     <div className="panel">
       <h2>Products</h2>
-      <form className="row form" onSubmit={create}>
-        <input placeholder="key (e.g. vv-analyzer)" value={key} onChange={(e) => setKey(e.target.value)} />
-        <input placeholder="Display name" value={name} onChange={(e) => setName(e.target.value)} />
-        <button className="primary" disabled={!key || !name}>
-          Add product
-        </button>
-      </form>
+      {can("product:write") && (
+        <form className="row form" onSubmit={create}>
+          <input placeholder="key (e.g. vv-analyzer)" value={key} onChange={(e) => setKey(e.target.value)} />
+          <input placeholder="Display name" value={name} onChange={(e) => setName(e.target.value)} />
+          <button className="primary" disabled={!key || !name}>
+            Add product
+          </button>
+        </form>
+      )}
       {error && <div className="error">{error}</div>}
       <table>
         <thead>

@@ -16,11 +16,16 @@
  * device can patch checks. This design targets casual copying, license sharing,
  * expiry/revocation enforcement, and tamper-evidence — not unbreakable DRM.
  */
+import { randomUUID } from "node:crypto";
 import {
   verifyLicenseToken,
   publicKeyFromPem,
+  hashDeviceBinding,
+  OFFLINE_SCHEMA_VERSION,
   type LicenseClaims,
   type PublicKeyStore,
+  type OfflineRequestFile,
+  type OfflineResponseFile,
 } from "@vehiclevo/licensing-shared";
 import { LicensingError, LicensingErrorCode } from "./errors.js";
 import { systemClock } from "./adapters.js";
@@ -58,8 +63,19 @@ export type SnapshotStatus =
   | "expired"
   | "offline_exceeded"
   | "clock_tampered"
+  | "device_mismatch"
   | "not_activated"
   | "invalid";
+
+export interface FloatingSeatHandle {
+  leaseId: string;
+  expiresAt: number;
+}
+
+export interface FloatingSeat extends FloatingSeatHandle {
+  seatsUsed: number;
+  maximumSeats: number;
+}
 
 export interface LicenseSnapshot {
   activated: boolean;
@@ -96,6 +112,7 @@ const DENIED = (
 export class LicensingClient {
   private readonly clock: Clock;
   private readonly keyStore: PublicKeyStore;
+  private lease: FloatingSeatHandle | null = null;
   private last: LicenseSnapshot = DENIED(
     "not_activated",
     LicensingErrorCode.NotActivated,
@@ -157,6 +174,53 @@ export class LicensingClient {
   async deactivate(): Promise<void> {
     await this.cfg.store.clear();
     this.last = DENIED("not_activated", LicensingErrorCode.NotActivated, "none", false);
+  }
+
+  /**
+   * generateOfflineRequest() — produce a request file for air-gapped activation.
+   * No network. The host app writes this to disk; the user carries it to a
+   * connected machine / the portal, which returns a signed response file.
+   */
+  generateOfflineRequest(activationCode: string): OfflineRequestFile {
+    return {
+      schemaVersion: OFFLINE_SCHEMA_VERSION,
+      kind: "offline-request",
+      requestId: randomUUID(),
+      deviceId: this.cfg.deviceId,
+      deviceLabel: this.cfg.deviceLabel ?? null,
+      activationCode,
+      createdAt: this.clock.now(),
+    };
+  }
+
+  /**
+   * importOfflineResponse() — verify and apply a signed offline response file.
+   * Verifies the token signature locally and that it is bound to THIS device,
+   * then activates offline with no server contact.
+   */
+  async importOfflineResponse(response: OfflineResponseFile): Promise<LicenseSnapshot> {
+    if (response?.kind !== "offline-response" || response.schemaVersion !== OFFLINE_SCHEMA_VERSION) {
+      throw new LicensingError(LicensingErrorCode.OfflineFileInvalid);
+    }
+    if (response.deviceId !== this.cfg.deviceId) {
+      throw new LicensingError(LicensingErrorCode.DeviceMismatch, "response device id mismatch");
+    }
+    const claims = this.verifyOrThrow(response.token);
+    if (
+      claims.deviceBinding !== null &&
+      claims.deviceBinding !== hashDeviceBinding(this.cfg.deviceId)
+    ) {
+      throw new LicensingError(LicensingErrorCode.DeviceMismatch);
+    }
+    const state: StoredState = {
+      licenseId: response.licenseId,
+      deviceId: this.cfg.deviceId,
+      token: response.token,
+      lastServerTime: claims.issuedAt,
+    };
+    await this.cfg.store.save(state);
+    this.last = this.snapshotFromToken(response.token, "offline_cache")!;
+    return this.last;
   }
 
   /**
@@ -232,19 +296,96 @@ export class LicensingClient {
     return this.last.offlineDaysRemaining;
   }
 
-  /** checkoutSeat() — floating licenses (implemented in a later phase). */
-  async checkoutSeat(): Promise<never> {
-    throw new LicensingError(
-      LicensingErrorCode.NotSupported,
-      "floating seat checkout is not enabled in this build",
-    );
+  /**
+   * checkoutSeat() — acquire a concurrent (floating) seat. Requires prior
+   * activation (for the licenseId + deviceId). While holding a seat, call
+   * heartbeatSeat() periodically (well within the returned lease window) and
+   * returnSeat() on shutdown. If a client crashes, its lease expires and the
+   * seat is reclaimed automatically.
+   */
+  async checkoutSeat(): Promise<FloatingSeat> {
+    const state = await this.cfg.store.load();
+    if (!state) throw new LicensingError(LicensingErrorCode.NotActivated);
+    let res;
+    try {
+      res = await this.cfg.http.post("/api/v1/floating/checkout", {
+        licenseId: state.licenseId,
+        deviceId: state.deviceId,
+        deviceLabel: this.cfg.deviceLabel ?? null,
+      });
+    } catch {
+      throw new LicensingError(LicensingErrorCode.Network);
+    }
+    if (res.status === 409) throw new LicensingError(LicensingErrorCode.SeatUnavailable);
+    if (res.status !== 200) {
+      throw new LicensingError(LicensingErrorCode.NotSupported, `server ${res.status}`);
+    }
+    const body = res.body as {
+      leaseId: string;
+      expiresAt: number;
+      seatsUsed: number;
+      maximumSeats: number;
+      token: string;
+    };
+    // Verify the entitlement token locally and refresh the snapshot.
+    this.verifyOrThrow(body.token);
+    const next: StoredState = {
+      ...state,
+      token: body.token,
+      lastServerTime: Math.max(state.lastServerTime, this.clock.now()),
+    };
+    await this.cfg.store.save(next);
+    this.last = this.snapshotFromToken(body.token, "online")!;
+    this.lease = { leaseId: body.leaseId, expiresAt: body.expiresAt };
+    return {
+      leaseId: body.leaseId,
+      expiresAt: body.expiresAt,
+      seatsUsed: body.seatsUsed,
+      maximumSeats: body.maximumSeats,
+    };
   }
 
-  async returnSeat(): Promise<never> {
-    throw new LicensingError(
-      LicensingErrorCode.NotSupported,
-      "floating seat return is not enabled in this build",
-    );
+  /** heartbeatSeat() — extend the held lease. Throws LeaseExpired if it was reclaimed. */
+  async heartbeatSeat(): Promise<{ expiresAt: number }> {
+    if (!this.lease) throw new LicensingError(LicensingErrorCode.NoActiveLease);
+    const state = await this.cfg.store.load();
+    if (!state) throw new LicensingError(LicensingErrorCode.NotActivated);
+    let res;
+    try {
+      res = await this.cfg.http.post("/api/v1/floating/heartbeat", {
+        leaseId: this.lease.leaseId,
+        deviceId: state.deviceId,
+      });
+    } catch {
+      throw new LicensingError(LicensingErrorCode.Network);
+    }
+    if (res.status === 409) {
+      this.lease = null; // lease was reclaimed; caller should re-checkout
+      throw new LicensingError(LicensingErrorCode.LeaseExpired);
+    }
+    if (res.status !== 200) throw new LicensingError(LicensingErrorCode.NotSupported, `server ${res.status}`);
+    const body = res.body as { expiresAt: number };
+    this.lease = { ...this.lease, expiresAt: body.expiresAt };
+    return { expiresAt: body.expiresAt };
+  }
+
+  /** returnSeat() — release the held concurrent seat (best-effort, idempotent). */
+  async returnSeat(): Promise<void> {
+    if (!this.lease) return;
+    const state = await this.cfg.store.load();
+    const leaseId = this.lease.leaseId;
+    this.lease = null;
+    if (!state) return;
+    try {
+      await this.cfg.http.post("/api/v1/floating/return", { leaseId, deviceId: state.deviceId });
+    } catch {
+      /* best effort — the lease will expire on its own if this fails */
+    }
+  }
+
+  /** The currently held concurrent seat, if any. */
+  getSeat(): FloatingSeatHandle | null {
+    return this.lease;
   }
 
   // --- internals ---
@@ -314,6 +455,16 @@ export class LicensingClient {
     });
     if (!r.claims) return null;
     const c = r.claims;
+
+    // Device binding: a device-bound (e.g. offline) token is only valid on the
+    // device it was issued for. Prevents copying an offline file to another machine.
+    if (c.deviceBinding !== null && c.deviceBinding !== hashDeviceBinding(this.cfg.deviceId)) {
+      return {
+        ...DENIED("device_mismatch", LicensingErrorCode.DeviceMismatch, source),
+        offlineDaysRemaining: 0,
+      };
+    }
+
     const offlineDaysRemaining =
       c.offlineUntil == null
         ? 0
