@@ -1,0 +1,20 @@
+# Local development only. Production uses managed Postgres + KMS/HSM.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: licensing
+      POSTGRES_PASSWORD: licensing
+      POSTGRES_DB: licensing
+    ports:
+      - "5432:5432"
+    volumes:
+      - licensing_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U licensing"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  licensing_pgdata:

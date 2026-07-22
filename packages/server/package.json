@@ -1,0 +1,20 @@
+{
+  "name": "@vehiclevo/licensing-server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc --build",
+    "start": "node dist/main.js",
+    "migrate": "node dist/infrastructure/persistence/migrate.js"
+  },
+  "dependencies": {
+    "@vehiclevo/licensing-shared": "0.1.0",
+    "fastify": "^5.2.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10"
+  }
+}

@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# Secrets & keys — NEVER commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+keys/local/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
