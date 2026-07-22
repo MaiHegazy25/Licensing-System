@@ -40,7 +40,7 @@ import type {
   ProductRepository,
   RevocationRepository,
 } from "./application/ports.js";
-import { ApiKeyPrincipalResolver } from "./infrastructure/auth/api-key-resolver.js";
+import { buildPrincipalResolver } from "./infrastructure/auth/resolver-factory.js";
 import type { PrincipalResolver } from "./application/auth.js";
 
 export interface Container {
@@ -129,7 +129,7 @@ export function buildContainer(
     tokenIssuer,
   });
 
-  const principals = ApiKeyPrincipalResolver.fromEnv();
+  const principals = buildPrincipalResolver();
 
   return {
     service,

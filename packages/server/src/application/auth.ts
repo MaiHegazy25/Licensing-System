@@ -12,8 +12,11 @@ export interface Principal {
 }
 
 export interface PrincipalResolver {
-  /** Returns the Principal for a bearer token, or null if it is not recognized. */
-  resolve(bearerToken: string | null): Principal | null;
-  /** True when at least one credential is configured (else auth is unconfigured). */
+  /**
+   * Returns the Principal for a bearer token, or null if it is not recognized.
+   * Async because production resolvers (OIDC) verify a JWT against remote JWKS.
+   */
+  resolve(bearerToken: string | null): Promise<Principal | null>;
+  /** True when the resolver is configured (else auth is unconfigured). */
   isConfigured(): boolean;
 }

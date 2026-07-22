@@ -59,21 +59,21 @@ export function buildHttpServer(container: Container): FastifyInstance {
   );
 
   // Authenticate a request to a Principal (401 if unknown / unconfigured).
-  const authenticate = (req: FastifyRequest): Principal => {
+  const authenticate = async (req: FastifyRequest): Promise<Principal> => {
     if (!container.principals.isConfigured()) {
       throw new DomainError(
         "VALIDATION",
-        "admin auth not configured (set ADMIN_API_KEY or ADMIN_API_KEYS)",
+        "admin auth not configured (set ADMIN_API_KEY/ADMIN_API_KEYS or AUTH_MODE=oidc)",
       );
     }
-    const principal = container.principals.resolve(bearer(req));
+    const principal = await container.principals.resolve(bearer(req));
     if (!principal) throw httpError(401, "unauthorized");
     return principal;
   };
 
   // Authenticate + require a specific permission (403 if the role lacks it).
-  const authorize = (req: FastifyRequest, permission: Permission): Principal => {
-    const principal = authenticate(req);
+  const authorize = async (req: FastifyRequest, permission: Permission): Promise<Principal> => {
+    const principal = await authenticate(req);
     if (!roleHasPermission(principal.role, permission)) {
       throw httpError(403, `forbidden: requires '${permission}'`);
     }
@@ -119,7 +119,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
 
   // --- Admin: identity (who am I + what can I do) ---
   app.get("/api/v1/admin/me", async (req, reply) => {
-    const principal = authenticate(req);
+    const principal = await authenticate(req);
     return reply.send({
       subject: principal.subject,
       role: principal.role,
@@ -129,7 +129,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
 
   // --- Admin: products ---
   app.post("/api/v1/admin/products", async (req, reply) => {
-    const principal = authorize(req, "product:write");
+    const principal = await authorize(req, "product:write");
     const body = req.body as { key: string; name: string };
     const product = await container.service.createProduct(body, principal.subject);
     return reply.code(201).send(product);
@@ -137,13 +137,13 @@ export function buildHttpServer(container: Container): FastifyInstance {
 
   // --- Admin: licenses ---
   app.post("/api/v1/admin/licenses", async (req, reply) => {
-    const principal = authorize(req, "license:create");
+    const principal = await authorize(req, "license:create");
     const license = await container.service.createLicense(req.body as never, principal.subject);
     return reply.code(201).send(license);
   });
 
   app.post("/api/v1/admin/licenses/:id/activation-codes", async (req, reply) => {
-    const principal = authorize(req, "activation:issue");
+    const principal = await authorize(req, "activation:issue");
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { maxActivations?: number };
     const { activationCode, record } = await container.service.generateActivationCode(
@@ -156,7 +156,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   app.post("/api/v1/admin/licenses/:id/revoke", async (req, reply) => {
-    const principal = authorize(req, "license:revoke");
+    const principal = await authorize(req, "license:revoke");
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { reason?: string };
     await container.service.revoke(id, body.reason ?? "revoked by admin", principal.subject);
@@ -164,7 +164,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   app.post("/api/v1/admin/licenses/:id/suspend", async (req, reply) => {
-    const principal = authorize(req, "license:manage");
+    const principal = await authorize(req, "license:manage");
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { reason?: string };
     const license = await container.service.suspend(
@@ -176,14 +176,14 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   app.post("/api/v1/admin/licenses/:id/resume", async (req, reply) => {
-    const principal = authorize(req, "license:manage");
+    const principal = await authorize(req, "license:manage");
     const { id } = req.params as { id: string };
     const license = await container.service.resume(id, principal.subject);
     return reply.send(license);
   });
 
   app.post("/api/v1/admin/licenses/:id/renew", async (req, reply) => {
-    const principal = authorize(req, "license:manage");
+    const principal = await authorize(req, "license:manage");
     const { id } = req.params as { id: string };
     const body = req.body as { expiresAt: number | null; maintenanceExpiresAt?: number | null };
     const license = await container.service.renew(id, body, principal.subject);
@@ -192,12 +192,12 @@ export function buildHttpServer(container: Container): FastifyInstance {
 
   // --- Admin: read side (portal) ---
   app.get("/api/v1/admin/products", async (req, reply) => {
-    authorize(req, "product:read");
+    await authorize(req, "product:read");
     return reply.send({ items: await container.service.listProducts() });
   });
 
   app.get("/api/v1/admin/licenses", async (req, reply) => {
-    authorize(req, "license:read");
+    await authorize(req, "license:read");
     const q = req.query as Record<string, string | undefined>;
     const result = await container.service.listLicenses({
       customerId: q.customerId,
@@ -210,13 +210,13 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   app.get("/api/v1/admin/licenses/:id", async (req, reply) => {
-    authorize(req, "license:read");
+    await authorize(req, "license:read");
     const { id } = req.params as { id: string };
     return reply.send(await container.service.getLicenseDetail(id));
   });
 
   app.get("/api/v1/admin/audit", async (req, reply) => {
-    authorize(req, "audit:read");
+    await authorize(req, "audit:read");
     const q = req.query as { licenseId?: string };
     return reply.send({ items: await container.service.listAuditEvents(q.licenseId) });
   });

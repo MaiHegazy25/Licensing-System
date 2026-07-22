@@ -64,23 +64,23 @@ describe("RBAC matrix", () => {
 });
 
 describe("ApiKeyPrincipalResolver", () => {
-  it("maps legacy ADMIN_API_KEY to system_admin", () => {
+  it("maps legacy ADMIN_API_KEY to system_admin", async () => {
     const r = ApiKeyPrincipalResolver.fromEnv({ ADMIN_API_KEY: "legacy-key-123456" });
     expect(r.isConfigured()).toBe(true);
-    expect(r.resolve("legacy-key-123456")).toEqual({ subject: "admin", role: "system_admin" });
-    expect(r.resolve("wrong")).toBeNull();
-    expect(r.resolve(null)).toBeNull();
+    expect(await r.resolve("legacy-key-123456")).toEqual({ subject: "admin", role: "system_admin" });
+    expect(await r.resolve("wrong")).toBeNull();
+    expect(await r.resolve(null)).toBeNull();
   });
 
-  it("maps JSON ADMIN_API_KEYS to their roles", () => {
+  it("maps JSON ADMIN_API_KEYS to their roles", async () => {
     const r = ApiKeyPrincipalResolver.fromEnv({
       ADMIN_API_KEYS: JSON.stringify([
         { subject: "alice", role: "auditor", key: "auditor-key-1" },
         { subject: "bob", role: "sales_ops", key: "sales-key-2" },
       ]),
     });
-    expect(r.resolve("auditor-key-1")?.role).toBe("auditor");
-    expect(r.resolve("sales-key-2")).toEqual({ subject: "bob", role: "sales_ops" });
+    expect((await r.resolve("auditor-key-1"))?.role).toBe("auditor");
+    expect(await r.resolve("sales-key-2")).toEqual({ subject: "bob", role: "sales_ops" });
   });
 
   it("rejects unknown roles and malformed JSON", () => {

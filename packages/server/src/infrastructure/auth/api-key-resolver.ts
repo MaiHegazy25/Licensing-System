@@ -54,7 +54,7 @@ export class ApiKeyPrincipalResolver implements PrincipalResolver {
     return this.entries.length > 0;
   }
 
-  resolve(bearerToken: string | null): Principal | null {
+  async resolve(bearerToken: string | null): Promise<Principal | null> {
     if (!bearerToken) return null;
     const presented = Buffer.from(bearerToken);
     for (const entry of this.entries) {

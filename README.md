@@ -102,12 +102,20 @@ audit trail.
 | `support` | issue codes (activation reset), read |
 | `auditor` | read + audit only (no writes) |
 
-Auth for the slice is API keys mapped to roles (`ADMIN_API_KEY` legacy →
-system_admin, or `ADMIN_API_KEYS` JSON for roled keys), entered at login, held
-in sessionStorage, sent as a Bearer token, never logged. **Production** swaps the
-API-key resolver for an OIDC (Entra ID / Keycloak) resolver behind the same
-`PrincipalResolver` port — routes and matrix unchanged. Backend endpoints live
-under `/api/v1/admin/*` with CORS for the SPA origin (`ADMIN_WEB_ORIGIN`).
+Authentication is selectable behind one `PrincipalResolver` port (`AUTH_MODE`):
+
+- **`apikey`** (default, dev): API keys mapped to roles — `ADMIN_API_KEY`
+  (legacy → system_admin) or `ADMIN_API_KEYS` JSON for roled keys. Entered at
+  login, held in sessionStorage, sent as a Bearer token, never logged.
+- **`oidc`** (production): validates IdP-issued JWT access tokens (Entra ID /
+  Keycloak) — RS256 signature checked against the IdP JWKS, `iss`/`aud`/`exp`
+  enforced, and the configured role/group claim mapped to our roles
+  (`OIDC_*` env). Uses Node's built-in crypto; no JWT library. `alg:none` and
+  non-RS256 tokens are rejected.
+
+Either way the **same permission matrix** enforces access; routes are unchanged.
+Backend endpoints live under `/api/v1/admin/*` with CORS for the SPA origin
+(`ADMIN_WEB_ORIGIN`).
 
 ## SDK integration examples
 
