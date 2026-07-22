@@ -13,7 +13,9 @@ import {
 import type {
   Activation,
   ActivationCodeRecord,
+  AuditEvent,
   Product,
+  Revocation,
   LicenseType,
 } from "../domain/types.js";
 import type {
@@ -23,6 +25,7 @@ import type {
   AuditRepository,
   Clock,
   IdGenerator,
+  LicenseQuery,
   LicenseRepository,
   ProductRepository,
   RevocationRepository,
@@ -287,5 +290,112 @@ export class LicensingService {
       at: now,
       metadata: { reason },
     });
+  }
+
+  /** Temporarily disable a license (reversible). */
+  async suspend(licenseId: string, reason: string, actor = "admin"): Promise<License> {
+    return this.transition(licenseId, "suspended", "license.suspended", { reason }, actor);
+  }
+
+  /** Re-enable a suspended license. */
+  async resume(licenseId: string, actor = "admin"): Promise<License> {
+    return this.transition(licenseId, "active", "license.resumed", {}, actor);
+  }
+
+  /**
+   * Renew: extend expiry (and optionally maintenance) and ensure the license is
+   * active. Renewing an expired license moves it back to active.
+   */
+  async renew(
+    licenseId: string,
+    input: { expiresAt: number | null; maintenanceExpiresAt?: number | null },
+    actor = "admin",
+  ): Promise<License> {
+    const license = await this.d.licenses.get(licenseId);
+    if (!license) throw new DomainError("NOT_FOUND", "license not found");
+    if (license.status === "revoked") {
+      throw new DomainError("INVALID_STATE_TRANSITION", "cannot renew a revoked license");
+    }
+    const now = this.d.clock.now();
+    const prevVersion = license.version;
+    license.expiresAt = input.expiresAt;
+    if (input.maintenanceExpiresAt !== undefined) {
+      license.maintenanceExpiresAt = input.maintenanceExpiresAt;
+    }
+    if (license.status === "expired") license.status = "active";
+    license.updatedAt = now;
+    license.version += 1;
+    await this.d.licenses.update(license, prevVersion);
+    await this.d.audit.append({
+      id: this.d.ids.next("evt"),
+      type: "license.renewed",
+      licenseId,
+      actor,
+      at: now,
+      metadata: { expiresAt: input.expiresAt },
+    });
+    return license;
+  }
+
+  // --- read side (portal) ---
+
+  async listProducts(): Promise<Product[]> {
+    return this.d.products.list();
+  }
+
+  async listLicenses(query: LicenseQuery): Promise<{ items: License[]; total: number }> {
+    return this.d.licenses.list(query);
+  }
+
+  /** Full detail for one license: activations, code metadata (never plaintext), revocation. */
+  async getLicenseDetail(licenseId: string): Promise<{
+    license: License;
+    activations: Activation[];
+    activationCodes: Array<Omit<ActivationCodeRecord, "codeHash">>;
+    revocation: Revocation | null;
+    audit: AuditEvent[];
+  }> {
+    const license = await this.d.licenses.get(licenseId);
+    if (!license) throw new DomainError("NOT_FOUND", "license not found");
+    const [activations, codes, revocation, audit] = await Promise.all([
+      this.d.activations.listByLicense(licenseId),
+      this.d.activationCodes.listByLicense(licenseId),
+      this.d.revocations.get(licenseId),
+      this.d.audit.query({ licenseId, limit: 100 }),
+    ]);
+    // Strip the hash so the portal never receives code material.
+    const activationCodes = codes.map(({ codeHash, ...rest }) => rest);
+    return { license, activations, activationCodes, revocation, audit };
+  }
+
+  async listAuditEvents(licenseId?: string): Promise<AuditEvent[]> {
+    return this.d.audit.query({ licenseId, limit: 200 });
+  }
+
+  private async transition(
+    licenseId: string,
+    to: LicenseStatus,
+    eventType: AuditEvent["type"],
+    metadata: Record<string, string | number | boolean | null>,
+    actor: string,
+  ): Promise<License> {
+    const license = await this.d.licenses.get(licenseId);
+    if (!license) throw new DomainError("NOT_FOUND", "license not found");
+    assertTransition(license.status, to);
+    const now = this.d.clock.now();
+    const prevVersion = license.version;
+    license.status = to;
+    license.updatedAt = now;
+    license.version += 1;
+    await this.d.licenses.update(license, prevVersion);
+    await this.d.audit.append({
+      id: this.d.ids.next("evt"),
+      type: eventType,
+      licenseId,
+      actor,
+      at: now,
+      metadata,
+    });
+    return license;
   }
 }

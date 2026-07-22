@@ -22,10 +22,11 @@ enforces signed, time-bounded entitlements and fails **safe**.
 
 ```
 packages/
-  shared/   canonical JSON + Ed25519 token sign/verify (used by server AND sdk)
-  server/   domain (license state machine) · app services · signing · API · migrations
-  sdk/      client SDK: init/activate/validate/hasFeature/offline/rollback
-docs/       architecture · threat-model · license-lifecycle · ADRs
+  shared/     canonical JSON + Ed25519 token sign/verify (used by server AND sdk)
+  server/     domain (license state machine) · app services · signing · API · migrations
+  sdk/        client SDK: init/activate/validate/hasFeature/offline/rollback
+  admin-web/  React + TS admin portal (Vite): products, licenses, audit
+docs/         architecture · threat-model · license-lifecycle · ADRs
 ```
 
 Design principle: `domain` depends on nothing; `application` on `domain`+ports;
@@ -56,6 +57,28 @@ SDK verifies the signed token locally → app gates a feature → admin revokes 
 SDK detects revocation on next online validation`, plus seat-limit enforcement,
 offline operation within the signed window, and clock-rollback detection. All
 covered by `packages/**/__tests__`.
+
+## Admin portal
+
+A React + TypeScript SPA (`packages/admin-web`) for license management: list/
+create products, list/filter/create licenses, view license detail (devices,
+seat usage, activation-code metadata — **never** code plaintext/hash), generate
+activation codes, and suspend/resume/renew/revoke — plus an audit log with CSV
+export.
+
+```bash
+# terminal 1: backend (see Quickstart to set env + keys)
+npm start -w @vehiclevo/licensing-server
+# terminal 2: portal (dev server proxies /api -> :8080)
+npm run dev -w @vehiclevo/licensing-admin-web   # http://localhost:5173
+npm run build -w @vehiclevo/licensing-admin-web # production bundle
+```
+
+Auth for the slice is the admin API key (entered at login, held in
+sessionStorage, sent as a Bearer token, never logged). Production replaces this
+with SSO (Entra ID / Keycloak) + the five RBAC roles. The backend adds the
+matching read/management endpoints under `/api/v1/admin/*` with CORS for the SPA
+origin (`ADMIN_WEB_ORIGIN`).
 
 ## SDK integration examples
 

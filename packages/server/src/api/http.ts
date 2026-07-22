@@ -39,6 +39,23 @@ export function buildHttpServer(container: Container): FastifyInstance {
     logger: { level: container.config.env === "development" ? "info" : "warn" },
   });
 
+  // Tolerate empty bodies on JSON requests: bodyless POSTs (e.g. /resume) must
+  // not 400 just because the client set content-type: application/json.
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string" },
+    (_req, body, done) => {
+      const s = (body as string).trim();
+      if (s.length === 0) return done(null, {});
+      try {
+        done(null, JSON.parse(s));
+      } catch (e) {
+        (e as { statusCode?: number }).statusCode = 400;
+        done(e as Error, undefined);
+      }
+    },
+  );
+
   const adminKey = process.env.ADMIN_API_KEY ?? "";
 
   const requireAdmin = async (req: FastifyRequest): Promise<void> => {
@@ -52,6 +69,19 @@ export function buildHttpServer(container: Container): FastifyInstance {
       throw e;
     }
   };
+
+  // CORS for the admin SPA (dev serves it on a different origin). The allowed
+  // origin is configurable; credentials are sent via Authorization header, not
+  // cookies, so we do not need Allow-Credentials.
+  const allowedOrigin = process.env.ADMIN_WEB_ORIGIN ?? "*";
+  app.addHook("onRequest", async (req, reply) => {
+    reply.header("access-control-allow-origin", allowedOrigin);
+    reply.header("access-control-allow-methods", "GET,POST,OPTIONS");
+    reply.header("access-control-allow-headers", "authorization,content-type");
+    if (req.method === "OPTIONS") {
+      return reply.code(204).send();
+    }
+  });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof DomainError) {
@@ -110,6 +140,60 @@ export function buildHttpServer(container: Container): FastifyInstance {
     const body = (req.body ?? {}) as { reason?: string };
     await container.service.revoke(id, body.reason ?? "revoked by admin");
     return reply.code(204).send();
+  });
+
+  app.post("/api/v1/admin/licenses/:id/suspend", async (req, reply) => {
+    await requireAdmin(req);
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { reason?: string };
+    const license = await container.service.suspend(id, body.reason ?? "suspended by admin");
+    return reply.send(license);
+  });
+
+  app.post("/api/v1/admin/licenses/:id/resume", async (req, reply) => {
+    await requireAdmin(req);
+    const { id } = req.params as { id: string };
+    const license = await container.service.resume(id);
+    return reply.send(license);
+  });
+
+  app.post("/api/v1/admin/licenses/:id/renew", async (req, reply) => {
+    await requireAdmin(req);
+    const { id } = req.params as { id: string };
+    const body = req.body as { expiresAt: number | null; maintenanceExpiresAt?: number | null };
+    const license = await container.service.renew(id, body);
+    return reply.send(license);
+  });
+
+  // --- Admin: read side (portal) ---
+  app.get("/api/v1/admin/products", async (req, reply) => {
+    await requireAdmin(req);
+    return reply.send({ items: await container.service.listProducts() });
+  });
+
+  app.get("/api/v1/admin/licenses", async (req, reply) => {
+    await requireAdmin(req);
+    const q = req.query as Record<string, string | undefined>;
+    const result = await container.service.listLicenses({
+      customerId: q.customerId,
+      productId: q.productId,
+      status: q.status,
+      limit: q.limit ? Number(q.limit) : undefined,
+      offset: q.offset ? Number(q.offset) : undefined,
+    });
+    return reply.send(result);
+  });
+
+  app.get("/api/v1/admin/licenses/:id", async (req, reply) => {
+    await requireAdmin(req);
+    const { id } = req.params as { id: string };
+    return reply.send(await container.service.getLicenseDetail(id));
+  });
+
+  app.get("/api/v1/admin/audit", async (req, reply) => {
+    await requireAdmin(req);
+    const q = req.query as { licenseId?: string };
+    return reply.send({ items: await container.service.listAuditEvents(q.licenseId) });
   });
 
   // --- Client: activation ---

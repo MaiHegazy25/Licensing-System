@@ -15,7 +15,9 @@ import type {
 import type {
   ActivationCodeRepository,
   ActivationRepository,
+  AuditQuery,
   AuditRepository,
+  LicenseQuery,
   LicenseRepository,
   ProductRepository,
   RevocationRepository,
@@ -36,6 +38,11 @@ export class InMemoryProductRepository implements ProductRepository {
   async getByKey(key: string): Promise<Product | null> {
     return this.byKey.has(key) ? clone(this.byKey.get(key)!) : null;
   }
+  async list(): Promise<Product[]> {
+    return [...this.byId.values()]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(clone);
+  }
 }
 
 export class InMemoryLicenseRepository implements LicenseRepository {
@@ -53,6 +60,16 @@ export class InMemoryLicenseRepository implements LicenseRepository {
       throw new DomainError("VALIDATION", "concurrent modification (version mismatch)");
     }
     this.byId.set(l.id, clone(l));
+  }
+  async list(query: LicenseQuery): Promise<{ items: License[]; total: number }> {
+    let items = [...this.byId.values()].sort((a, b) => b.createdAt - a.createdAt);
+    if (query.customerId) items = items.filter((l) => l.customerId === query.customerId);
+    if (query.productId) items = items.filter((l) => l.productId === query.productId);
+    if (query.status) items = items.filter((l) => l.status === query.status);
+    const total = items.length;
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? 50;
+    return { items: items.slice(offset, offset + limit).map(clone), total };
   }
 }
 
@@ -72,6 +89,12 @@ export class InMemoryActivationCodeRepository implements ActivationCodeRepositor
   }
   async update(r: ActivationCodeRecord): Promise<void> {
     this.byId.set(r.id, clone(r));
+  }
+  async listByLicense(licenseId: string): Promise<ActivationCodeRecord[]> {
+    return [...this.byId.values()]
+      .filter((r) => r.licenseId === licenseId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(clone);
   }
 }
 
@@ -104,6 +127,12 @@ export class InMemoryActivationRepository implements ActivationRepository {
   async update(a: Activation): Promise<void> {
     this.byId.set(a.id, clone(a));
   }
+  async listByLicense(licenseId: string): Promise<Activation[]> {
+    return [...this.byId.values()]
+      .filter((a) => a.licenseId === licenseId)
+      .sort((a, b) => b.activatedAt - a.activatedAt)
+      .map(clone);
+  }
 }
 
 export class InMemoryRevocationRepository implements RevocationRepository {
@@ -114,11 +143,19 @@ export class InMemoryRevocationRepository implements RevocationRepository {
   async isRevoked(licenseId: string): Promise<boolean> {
     return this.revoked.has(licenseId);
   }
+  async get(licenseId: string): Promise<Revocation | null> {
+    return this.revoked.has(licenseId) ? clone(this.revoked.get(licenseId)!) : null;
+  }
 }
 
 export class InMemoryAuditRepository implements AuditRepository {
   readonly events: AuditEvent[] = [];
   async append(e: AuditEvent): Promise<void> {
     this.events.push(clone(e));
+  }
+  async query(query: AuditQuery): Promise<AuditEvent[]> {
+    let items = [...this.events].sort((a, b) => b.at - a.at);
+    if (query.licenseId) items = items.filter((e) => e.licenseId === query.licenseId);
+    return items.slice(0, query.limit ?? 100).map(clone);
   }
 }
