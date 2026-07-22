@@ -44,6 +44,21 @@ export interface Revocation {
   revokedAt: number;
 }
 
+/**
+ * A concurrent (floating) seat lease. A lease is "active" while
+ * releasedAt IS NULL AND expiresAt > now. A crashed client's lease is reclaimed
+ * automatically once it expires (no explicit return needed).
+ */
+export interface FloatingLease {
+  id: string;
+  licenseId: string;
+  deviceId: string;
+  deviceLabel: string | null;
+  acquiredAt: number;
+  expiresAt: number;
+  releasedAt: number | null;
+}
+
 export type AuditEventType =
   | "product.created"
   | "license.created"
@@ -56,7 +71,9 @@ export type AuditEventType =
   | "license.renewed"
   | "device.deactivated"
   | "activation_reset.requested"
-  | "license_file.downloaded";
+  | "license_file.downloaded"
+  | "floating.checkout"
+  | "floating.return";
 
 export interface AuditEvent {
   id: string;

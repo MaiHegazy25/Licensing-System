@@ -121,6 +121,28 @@ export function LicenseDetail({
           </tbody>
         </table>
 
+        {(l.licenseType === "floating" || detail.floatingLeases.length > 0) && (
+          <>
+            <h4>Floating seats ({detail.floatingLeases.length} / {l.maximumSeats} checked out)</h4>
+            <table>
+              <thead><tr><th>Device</th><th>Label</th><th>Acquired</th><th>Lease expires</th></tr></thead>
+              <tbody>
+                {detail.floatingLeases.map((lease) => (
+                  <tr key={lease.id}>
+                    <td className="mono">{lease.deviceId.slice(0, 16)}…</td>
+                    <td>{lease.deviceLabel ?? "—"}</td>
+                    <td>{fmtDate(lease.acquiredAt)}</td>
+                    <td>{fmtDate(lease.expiresAt)}</td>
+                  </tr>
+                ))}
+                {detail.floatingLeases.length === 0 && (
+                  <tr><td colSpan={4} className="muted">No seats currently checked out.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </>
+        )}
+
         <h4>Activation codes</h4>
         <table>
           <thead><tr><th>ID</th><th>Status</th><th>Used</th><th>Created</th></tr></thead>

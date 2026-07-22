@@ -61,6 +61,16 @@ export type SnapshotStatus =
   | "not_activated"
   | "invalid";
 
+export interface FloatingSeatHandle {
+  leaseId: string;
+  expiresAt: number;
+}
+
+export interface FloatingSeat extends FloatingSeatHandle {
+  seatsUsed: number;
+  maximumSeats: number;
+}
+
 export interface LicenseSnapshot {
   activated: boolean;
   /** True only when the app is currently entitled to run paid functionality. */
@@ -96,6 +106,7 @@ const DENIED = (
 export class LicensingClient {
   private readonly clock: Clock;
   private readonly keyStore: PublicKeyStore;
+  private lease: FloatingSeatHandle | null = null;
   private last: LicenseSnapshot = DENIED(
     "not_activated",
     LicensingErrorCode.NotActivated,
@@ -232,19 +243,96 @@ export class LicensingClient {
     return this.last.offlineDaysRemaining;
   }
 
-  /** checkoutSeat() — floating licenses (implemented in a later phase). */
-  async checkoutSeat(): Promise<never> {
-    throw new LicensingError(
-      LicensingErrorCode.NotSupported,
-      "floating seat checkout is not enabled in this build",
-    );
+  /**
+   * checkoutSeat() — acquire a concurrent (floating) seat. Requires prior
+   * activation (for the licenseId + deviceId). While holding a seat, call
+   * heartbeatSeat() periodically (well within the returned lease window) and
+   * returnSeat() on shutdown. If a client crashes, its lease expires and the
+   * seat is reclaimed automatically.
+   */
+  async checkoutSeat(): Promise<FloatingSeat> {
+    const state = await this.cfg.store.load();
+    if (!state) throw new LicensingError(LicensingErrorCode.NotActivated);
+    let res;
+    try {
+      res = await this.cfg.http.post("/api/v1/floating/checkout", {
+        licenseId: state.licenseId,
+        deviceId: state.deviceId,
+        deviceLabel: this.cfg.deviceLabel ?? null,
+      });
+    } catch {
+      throw new LicensingError(LicensingErrorCode.Network);
+    }
+    if (res.status === 409) throw new LicensingError(LicensingErrorCode.SeatUnavailable);
+    if (res.status !== 200) {
+      throw new LicensingError(LicensingErrorCode.NotSupported, `server ${res.status}`);
+    }
+    const body = res.body as {
+      leaseId: string;
+      expiresAt: number;
+      seatsUsed: number;
+      maximumSeats: number;
+      token: string;
+    };
+    // Verify the entitlement token locally and refresh the snapshot.
+    this.verifyOrThrow(body.token);
+    const next: StoredState = {
+      ...state,
+      token: body.token,
+      lastServerTime: Math.max(state.lastServerTime, this.clock.now()),
+    };
+    await this.cfg.store.save(next);
+    this.last = this.snapshotFromToken(body.token, "online")!;
+    this.lease = { leaseId: body.leaseId, expiresAt: body.expiresAt };
+    return {
+      leaseId: body.leaseId,
+      expiresAt: body.expiresAt,
+      seatsUsed: body.seatsUsed,
+      maximumSeats: body.maximumSeats,
+    };
   }
 
-  async returnSeat(): Promise<never> {
-    throw new LicensingError(
-      LicensingErrorCode.NotSupported,
-      "floating seat return is not enabled in this build",
-    );
+  /** heartbeatSeat() — extend the held lease. Throws LeaseExpired if it was reclaimed. */
+  async heartbeatSeat(): Promise<{ expiresAt: number }> {
+    if (!this.lease) throw new LicensingError(LicensingErrorCode.NoActiveLease);
+    const state = await this.cfg.store.load();
+    if (!state) throw new LicensingError(LicensingErrorCode.NotActivated);
+    let res;
+    try {
+      res = await this.cfg.http.post("/api/v1/floating/heartbeat", {
+        leaseId: this.lease.leaseId,
+        deviceId: state.deviceId,
+      });
+    } catch {
+      throw new LicensingError(LicensingErrorCode.Network);
+    }
+    if (res.status === 409) {
+      this.lease = null; // lease was reclaimed; caller should re-checkout
+      throw new LicensingError(LicensingErrorCode.LeaseExpired);
+    }
+    if (res.status !== 200) throw new LicensingError(LicensingErrorCode.NotSupported, `server ${res.status}`);
+    const body = res.body as { expiresAt: number };
+    this.lease = { ...this.lease, expiresAt: body.expiresAt };
+    return { expiresAt: body.expiresAt };
+  }
+
+  /** returnSeat() — release the held concurrent seat (best-effort, idempotent). */
+  async returnSeat(): Promise<void> {
+    if (!this.lease) return;
+    const state = await this.cfg.store.load();
+    const leaseId = this.lease.leaseId;
+    this.lease = null;
+    if (!state) return;
+    try {
+      await this.cfg.http.post("/api/v1/floating/return", { leaseId, deviceId: state.deviceId });
+    } catch {
+      /* best effort — the lease will expire on its own if this fails */
+    }
+  }
+
+  /** The currently held concurrent seat, if any. */
+  getSeat(): FloatingSeatHandle | null {
+    return this.lease;
   }
 
   // --- internals ---

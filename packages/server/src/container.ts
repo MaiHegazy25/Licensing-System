@@ -18,6 +18,7 @@ import {
   InMemoryActivationCodeRepository,
   InMemoryActivationRepository,
   InMemoryAuditRepository,
+  InMemoryFloatingLeaseRepository,
   InMemoryLicenseRepository,
   InMemoryProductRepository,
   InMemoryRevocationRepository,
@@ -26,6 +27,7 @@ import {
   PgActivationCodeRepository,
   PgActivationRepository,
   PgAuditRepository,
+  PgFloatingLeaseRepository,
   PgLicenseRepository,
   PgProductRepository,
   PgRevocationRepository,
@@ -36,6 +38,7 @@ import type {
   ActivationRepository,
   AuditRepository,
   Clock,
+  FloatingLeaseRepository,
   LicenseRepository,
   ProductRepository,
   RevocationRepository,
@@ -62,6 +65,7 @@ interface RepoSet {
   licenses: LicenseRepository;
   activationCodes: ActivationCodeRepository;
   activations: ActivationRepository;
+  floatingLeases: FloatingLeaseRepository;
   revocations: RevocationRepository;
   audit: AuditRepository;
   pool: Pool | null;
@@ -75,6 +79,7 @@ function buildRepos(cfg: AppConfig): RepoSet {
       licenses: new PgLicenseRepository(pool),
       activationCodes: new PgActivationCodeRepository(pool),
       activations: new PgActivationRepository(pool),
+      floatingLeases: new PgFloatingLeaseRepository(pool),
       revocations: new PgRevocationRepository(pool),
       audit: new PgAuditRepository(pool),
       pool,
@@ -85,6 +90,7 @@ function buildRepos(cfg: AppConfig): RepoSet {
     licenses: new InMemoryLicenseRepository(),
     activationCodes: new InMemoryActivationCodeRepository(),
     activations: new InMemoryActivationRepository(),
+    floatingLeases: new InMemoryFloatingLeaseRepository(),
     revocations: new InMemoryRevocationRepository(),
     audit: new InMemoryAuditRepository(),
     pool: null,
@@ -126,9 +132,11 @@ export function buildContainer(
     licenses: repos.licenses,
     activationCodes: repos.activationCodes,
     activations: repos.activations,
+    floatingLeases: repos.floatingLeases,
     revocations: repos.revocations,
     audit: repos.audit,
     tokenIssuer,
+    floatingLeaseTtlSeconds: Number(process.env.FLOATING_LEASE_TTL_SECONDS ?? 900),
   });
 
   const principals = buildPrincipalResolver();

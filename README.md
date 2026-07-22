@@ -162,6 +162,21 @@ if (!status.ok) showLicensingScreen(status);  // fails safe: features stay off
 setInterval(() => { void licensing.validateLicense(); }, 6 * 60 * 60 * 1000);
 ```
 
+### Floating (concurrent) seats
+```ts
+const seat = await licensing.checkoutSeat();        // throws SeatUnavailable if full
+const hb = setInterval(async () => {
+  try { await licensing.heartbeatSeat(); }          // keep the lease alive
+  catch { clearInterval(hb); await licensing.checkoutSeat(); } // reclaimed → re-checkout
+}, seat.expiresAt ? 60_000 : 60_000);
+// on shutdown:
+clearInterval(hb);
+await licensing.returnSeat();                        // free the seat immediately
+```
+A crashed client needs no cleanup — its lease expires and the seat is reclaimed
+automatically. Checkout is atomic server-side (license row lock), so the
+concurrent cap can never be exceeded even under parallel checkout.
+
 ### Feature gating (not a single bypassable gate — re-check at the call site)
 ```ts
 function exportPdf() {

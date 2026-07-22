@@ -160,4 +160,26 @@ d("Postgres persistence", () => {
     );
     expect(Number(count.rows[0]!.n)).toBe(2); // DB agrees — no oversell
   });
+
+  it("never exceeds the concurrent-seat cap under parallel floating checkout", async () => {
+    const product = await container.service.createProduct({ key: "vv-float-pg", name: "Float" });
+    const license = await container.service.createLicense({
+      customerId: "c", productId: product.id, edition: "e", enabledFeatures: [],
+      licenseType: "floating", maximumSeats: 3,
+    });
+    // 10 distinct devices race to check out a concurrent seat.
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, (_, i) =>
+        container.service.checkoutSeat({ licenseId: license.id, deviceId: `fdev-${i}` }),
+      ),
+    );
+    const ok = results.filter((r) => r.status === "fulfilled").length;
+    expect(ok).toBe(3);
+
+    const active = await container.pool!.query<{ n: string }>(
+      "SELECT count(*)::int AS n FROM floating_leases WHERE license_id=$1 AND released_at IS NULL AND expires_at > $2",
+      [license.id, 1_700_000_000],
+    );
+    expect(Number(active.rows[0]!.n)).toBe(3); // DB agrees — cap held
+  });
 });

@@ -62,10 +62,19 @@ export interface AuditEvent {
   metadata: Record<string, unknown>;
 }
 
+export interface FloatingLease {
+  id: string;
+  deviceId: string;
+  deviceLabel: string | null;
+  acquiredAt: number;
+  expiresAt: number;
+}
+
 export interface LicenseDetail {
   license: License;
   activations: Activation[];
   activationCodes: ActivationCodeMeta[];
+  floatingLeases: FloatingLease[];
   revocation: { reason: string; revokedAt: number } | null;
   audit: AuditEvent[];
 }

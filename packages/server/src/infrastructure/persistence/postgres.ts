@@ -13,14 +13,17 @@ import type {
   Activation,
   ActivationCodeRecord,
   AuditEvent,
+  FloatingLease,
   Product,
   Revocation,
 } from "../../domain/types.js";
 import type {
+  AcquireLeaseParams,
   ActivationCodeRepository,
   ActivationRepository,
   AuditQuery,
   AuditRepository,
+  FloatingLeaseRepository,
   LicenseQuery,
   LicenseRepository,
   ProductRepository,
@@ -269,6 +272,99 @@ export class PgActivationRepository implements ActivationRepository {
         throw e;
       }
     });
+  }
+}
+
+function toLease(r: Record<string, unknown>): FloatingLease {
+  return {
+    id: r.id as string,
+    licenseId: r.license_id as string,
+    deviceId: r.device_id as string,
+    deviceLabel: (r.device_label as string | null) ?? null,
+    acquiredAt: Number(r.acquired_at),
+    expiresAt: Number(r.expires_at),
+    releasedAt: r.released_at == null ? null : Number(r.released_at),
+  };
+}
+
+export class PgFloatingLeaseRepository implements FloatingLeaseRepository {
+  constructor(private readonly pool: Pool) {}
+
+  async acquire(p: AcquireLeaseParams): Promise<FloatingLease | null> {
+    return withTransaction(this.pool, async (client) => {
+      // Serialize concurrent-seat operations for this license via a row lock so
+      // count-then-insert is atomic and the cap can never be exceeded.
+      await client.query("SELECT 1 FROM licenses WHERE id=$1 FOR UPDATE", [p.licenseId]);
+      const newExpiry = p.now + p.ttlSeconds;
+
+      // Renew if this device already holds an active lease.
+      const existing = await client.query(
+        `SELECT * FROM floating_leases
+         WHERE license_id=$1 AND device_id=$2 AND released_at IS NULL AND expires_at > $3
+         LIMIT 1`,
+        [p.licenseId, p.deviceId, p.now],
+      );
+      if (existing.rows[0]) {
+        const updated = await client.query(
+          "UPDATE floating_leases SET expires_at=$2 WHERE id=$1 RETURNING *",
+          [existing.rows[0].id, newExpiry],
+        );
+        return toLease(updated.rows[0]!);
+      }
+
+      const countRes = await client.query<{ n: string }>(
+        "SELECT count(*)::int AS n FROM floating_leases WHERE license_id=$1 AND released_at IS NULL AND expires_at > $2",
+        [p.licenseId, p.now],
+      );
+      if (Number(countRes.rows[0]?.n ?? 0) >= p.maxSeats) return null;
+
+      const inserted = await client.query(
+        `INSERT INTO floating_leases
+          (id, license_id, device_id, device_label, acquired_at, expires_at, released_at)
+         VALUES ($1,$2,$3,$4,$5,$6,NULL) RETURNING *`,
+        [p.id, p.licenseId, p.deviceId, p.deviceLabel, p.now, newExpiry],
+      );
+      return toLease(inserted.rows[0]!);
+    });
+  }
+
+  async heartbeat(p: {
+    leaseId: string;
+    deviceId: string;
+    now: number;
+    ttlSeconds: number;
+  }): Promise<FloatingLease | null> {
+    const { rows } = await this.pool.query(
+      `UPDATE floating_leases SET expires_at=$4
+       WHERE id=$1 AND device_id=$2 AND released_at IS NULL AND expires_at > $3
+       RETURNING *`,
+      [p.leaseId, p.deviceId, p.now, p.now + p.ttlSeconds],
+    );
+    return rows[0] ? toLease(rows[0]) : null;
+  }
+
+  async release(leaseId: string, deviceId: string, now: number): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      "UPDATE floating_leases SET released_at=$3 WHERE id=$1 AND device_id=$2 AND released_at IS NULL",
+      [leaseId, deviceId, now],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  async countActive(licenseId: string, now: number): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      "SELECT count(*)::int AS n FROM floating_leases WHERE license_id=$1 AND released_at IS NULL AND expires_at > $2",
+      [licenseId, now],
+    );
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  async listActive(licenseId: string, now: number): Promise<FloatingLease[]> {
+    const { rows } = await this.pool.query(
+      "SELECT * FROM floating_leases WHERE license_id=$1 AND released_at IS NULL AND expires_at > $2 ORDER BY acquired_at ASC",
+      [licenseId, now],
+    );
+    return rows.map(toLease);
   }
 }
 

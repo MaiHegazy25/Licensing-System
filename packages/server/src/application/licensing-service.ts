@@ -14,6 +14,7 @@ import type {
   Activation,
   ActivationCodeRecord,
   AuditEvent,
+  FloatingLease,
   Product,
   Revocation,
   LicenseType,
@@ -24,6 +25,7 @@ import type {
   ActivationRepository,
   AuditRepository,
   Clock,
+  FloatingLeaseRepository,
   IdGenerator,
   LicenseQuery,
   LicenseRepository,
@@ -40,9 +42,12 @@ export interface LicensingServiceDeps {
   licenses: LicenseRepository;
   activationCodes: ActivationCodeRepository;
   activations: ActivationRepository;
+  floatingLeases: FloatingLeaseRepository;
   revocations: RevocationRepository;
   audit: AuditRepository;
   tokenIssuer: TokenIssuer;
+  /** Lease duration for a floating checkout/heartbeat. */
+  floatingLeaseTtlSeconds: number;
 }
 
 export interface CreateLicenseInput {
@@ -357,20 +362,22 @@ export class LicensingService {
     license: License;
     activations: Activation[];
     activationCodes: Array<Omit<ActivationCodeRecord, "codeHash">>;
+    floatingLeases: FloatingLease[];
     revocation: Revocation | null;
     audit: AuditEvent[];
   }> {
     const license = await this.d.licenses.get(licenseId);
     if (!license) throw new DomainError("NOT_FOUND", "license not found");
-    const [activations, codes, revocation, audit] = await Promise.all([
+    const [activations, codes, floatingLeases, revocation, audit] = await Promise.all([
       this.d.activations.listByLicense(licenseId),
       this.d.activationCodes.listByLicense(licenseId),
+      this.d.floatingLeases.listActive(licenseId, this.d.clock.now()),
       this.d.revocations.get(licenseId),
       this.d.audit.query({ licenseId, limit: 100 }),
     ]);
     // Strip the hash so the portal never receives code material.
     const activationCodes = codes.map(({ codeHash, ...rest }) => rest);
-    return { license, activations, activationCodes, revocation, audit };
+    return { license, activations, activationCodes, floatingLeases, revocation, audit };
   }
 
   async listAuditEvents(licenseId?: string): Promise<AuditEvent[]> {
@@ -476,6 +483,113 @@ export class LicensingService {
       metadata: { tokenId: issued.tokenId },
     });
     return { token: issued.token, licenseId };
+  }
+
+  // --- floating (concurrent) seats ---
+
+  /** Validate a license is usable for a floating checkout, else throw. */
+  private async requireCheckoutableLicense(licenseId: string): Promise<License> {
+    const license = await this.d.licenses.get(licenseId);
+    if (!license) throw new DomainError("NOT_FOUND", "license not found");
+    if (license.licenseType !== "floating") {
+      throw new DomainError("VALIDATION", "license is not a floating license");
+    }
+    if (await this.d.revocations.isRevoked(license.id)) {
+      throw new DomainError("LICENSE_NOT_ACTIVE", "license is revoked");
+    }
+    if (license.status !== "active") {
+      throw new DomainError("LICENSE_NOT_ACTIVE", `license is ${license.status}`);
+    }
+    const now = this.d.clock.now();
+    if (license.expiresAt !== null && now > license.expiresAt + license.gracePeriodSeconds) {
+      throw new DomainError("LICENSE_NOT_ACTIVE", "license is expired");
+    }
+    return license;
+  }
+
+  /** Check out a concurrent seat (atomic). Returns the lease + a signed token. */
+  async checkoutSeat(input: {
+    licenseId: string;
+    deviceId: string;
+    deviceLabel?: string | null;
+  }): Promise<{
+    leaseId: string;
+    expiresAt: number;
+    seatsUsed: number;
+    maximumSeats: number;
+    token: string;
+  }> {
+    const license = await this.requireCheckoutableLicense(input.licenseId);
+    const now = this.d.clock.now();
+    const lease = await this.d.floatingLeases.acquire({
+      id: this.d.ids.next("lease"),
+      licenseId: license.id,
+      deviceId: input.deviceId,
+      deviceLabel: input.deviceLabel ?? null,
+      now,
+      ttlSeconds: this.d.floatingLeaseTtlSeconds,
+      maxSeats: license.maximumSeats,
+    });
+    if (!lease) {
+      throw new DomainError("SEAT_LIMIT_REACHED", "no concurrent seats available");
+    }
+    const [seatsUsed, issued] = await Promise.all([
+      this.d.floatingLeases.countActive(license.id, now),
+      this.d.tokenIssuer.issue(license),
+    ]);
+    await this.d.audit.append({
+      id: this.d.ids.next("evt"),
+      type: "floating.checkout",
+      licenseId: license.id,
+      actor: `sdk:${input.deviceId}`,
+      at: now,
+      metadata: { leaseId: lease.id, seatsUsed },
+    });
+    return {
+      leaseId: lease.id,
+      expiresAt: lease.expiresAt,
+      seatsUsed,
+      maximumSeats: license.maximumSeats,
+      token: issued.token,
+    };
+  }
+
+  /** Extend a held lease. Throws LEASE_NOT_FOUND if it has expired/been returned. */
+  async heartbeatSeat(input: {
+    leaseId: string;
+    deviceId: string;
+  }): Promise<{ leaseId: string; expiresAt: number }> {
+    const now = this.d.clock.now();
+    const lease = await this.d.floatingLeases.heartbeat({
+      leaseId: input.leaseId,
+      deviceId: input.deviceId,
+      now,
+      ttlSeconds: this.d.floatingLeaseTtlSeconds,
+    });
+    if (!lease) {
+      throw new DomainError("LEASE_NOT_FOUND", "lease is no longer active; re-checkout required");
+    }
+    return { leaseId: lease.id, expiresAt: lease.expiresAt };
+  }
+
+  /** Return a concurrent seat (idempotent). */
+  async returnSeat(input: { leaseId: string; deviceId: string }): Promise<void> {
+    const now = this.d.clock.now();
+    const released = await this.d.floatingLeases.release(input.leaseId, input.deviceId, now);
+    if (released) {
+      await this.d.audit.append({
+        id: this.d.ids.next("evt"),
+        type: "floating.return",
+        licenseId: null,
+        actor: `sdk:${input.deviceId}`,
+        at: now,
+        metadata: { leaseId: input.leaseId },
+      });
+    }
+  }
+
+  async listActiveLeases(licenseId: string): Promise<FloatingLease[]> {
+    return this.d.floatingLeases.listActive(licenseId, this.d.clock.now());
   }
 
   private async transition(

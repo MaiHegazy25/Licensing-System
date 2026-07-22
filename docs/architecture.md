@@ -138,6 +138,6 @@ endpoints exist today (`/health`, `/ready`).
 | OIDC auth (Entra ID/Keycloak) behind auth port | ✅ RS256 JWT + JWKS + role mapping, resolver-selectable via AUTH_MODE (API-key resolver remains for dev) |
 | Customer portal (React SPA) + scoped API | ✅ view licenses/features/dates, seat usage, view + deactivate devices, download license file, request reset; strict per-customer isolation + tests |
 | Device transfer (via self-service deactivation freeing a seat) | ✅ deactivation frees a seat; full transfer UX ⏳ |
+| Floating/concurrent licenses (atomic checkout, heartbeat, return, expiry reclaim) | ✅ implemented + tested (incl. concurrent cap enforcement over Postgres); admin monitoring + SDK |
 | Offline file req/resp, trials | ⏳ planned |
-| Floating leases (atomic checkout) | ⏳ schema ready; seat-lock primitive in place; lease logic planned |
 | Reporting, key rotation runbook, monitoring | ⏳ planned (P6) |

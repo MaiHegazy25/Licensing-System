@@ -20,6 +20,7 @@ const HTTP_FOR_CODE: Record<DomainErrorCode, number> = {
   ACTIVATION_CODE_CONSUMED: 409,
   SEAT_LIMIT_REACHED: 409,
   LICENSE_NOT_ACTIVE: 403,
+  LEASE_NOT_FOUND: 409,
   VALIDATION: 400,
 };
 
@@ -238,6 +239,28 @@ export function buildHttpServer(container: Container): FastifyInstance {
     const result = await container.service.validate(body);
     const code = result.status === "valid" ? 200 : 403;
     return reply.code(code).send(result);
+  });
+
+  // --- Client: floating (concurrent) seats ---
+  app.post("/api/v1/floating/checkout", async (req, reply) => {
+    const body = req.body as { licenseId: string; deviceId: string; deviceLabel?: string };
+    const result = await container.service.checkoutSeat({
+      licenseId: body.licenseId,
+      deviceId: body.deviceId,
+      deviceLabel: body.deviceLabel ?? null,
+    });
+    return reply.send(result);
+  });
+
+  app.post("/api/v1/floating/heartbeat", async (req, reply) => {
+    const body = req.body as { leaseId: string; deviceId: string };
+    return reply.send(await container.service.heartbeatSeat(body));
+  });
+
+  app.post("/api/v1/floating/return", async (req, reply) => {
+    const body = req.body as { leaseId: string; deviceId: string };
+    await container.service.returnSeat(body);
+    return reply.code(204).send();
   });
 
   // --- Customer portal (scoped to the authenticated customerId) ---
