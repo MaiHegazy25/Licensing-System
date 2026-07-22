@@ -20,6 +20,7 @@ import {
   InMemoryAuditRepository,
   InMemoryFloatingLeaseRepository,
   InMemoryLicenseRepository,
+  InMemoryOfflineRepository,
   InMemoryProductRepository,
   InMemoryRevocationRepository,
 } from "./infrastructure/persistence/memory.js";
@@ -29,6 +30,7 @@ import {
   PgAuditRepository,
   PgFloatingLeaseRepository,
   PgLicenseRepository,
+  PgOfflineRepository,
   PgProductRepository,
   PgRevocationRepository,
 } from "./infrastructure/persistence/postgres.js";
@@ -40,6 +42,7 @@ import type {
   Clock,
   FloatingLeaseRepository,
   LicenseRepository,
+  OfflineRepository,
   ProductRepository,
   RevocationRepository,
 } from "./application/ports.js";
@@ -66,6 +69,7 @@ interface RepoSet {
   activationCodes: ActivationCodeRepository;
   activations: ActivationRepository;
   floatingLeases: FloatingLeaseRepository;
+  offline: OfflineRepository;
   revocations: RevocationRepository;
   audit: AuditRepository;
   pool: Pool | null;
@@ -80,6 +84,7 @@ function buildRepos(cfg: AppConfig): RepoSet {
       activationCodes: new PgActivationCodeRepository(pool),
       activations: new PgActivationRepository(pool),
       floatingLeases: new PgFloatingLeaseRepository(pool),
+      offline: new PgOfflineRepository(pool),
       revocations: new PgRevocationRepository(pool),
       audit: new PgAuditRepository(pool),
       pool,
@@ -91,6 +96,7 @@ function buildRepos(cfg: AppConfig): RepoSet {
     activationCodes: new InMemoryActivationCodeRepository(),
     activations: new InMemoryActivationRepository(),
     floatingLeases: new InMemoryFloatingLeaseRepository(),
+    offline: new InMemoryOfflineRepository(),
     revocations: new InMemoryRevocationRepository(),
     audit: new InMemoryAuditRepository(),
     pool: null,
@@ -133,10 +139,12 @@ export function buildContainer(
     activationCodes: repos.activationCodes,
     activations: repos.activations,
     floatingLeases: repos.floatingLeases,
+    offline: repos.offline,
     revocations: repos.revocations,
     audit: repos.audit,
     tokenIssuer,
     floatingLeaseTtlSeconds: Number(process.env.FLOATING_LEASE_TTL_SECONDS ?? 900),
+    offlineTokenMaxDays: Number(process.env.OFFLINE_TOKEN_MAX_DAYS ?? 365),
   });
 
   const principals = buildPrincipalResolver();

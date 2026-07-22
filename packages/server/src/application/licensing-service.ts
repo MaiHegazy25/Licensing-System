@@ -6,6 +6,12 @@
  */
 import { DomainError } from "../domain/errors.js";
 import {
+  hashDeviceBinding,
+  OFFLINE_SCHEMA_VERSION,
+  type OfflineRequestFile,
+  type OfflineResponseFile,
+} from "@vehiclevo/licensing-shared";
+import {
   assertTransition,
   type License,
   type LicenseStatus,
@@ -29,6 +35,7 @@ import type {
   IdGenerator,
   LicenseQuery,
   LicenseRepository,
+  OfflineRepository,
   ProductRepository,
   RevocationRepository,
 } from "./ports.js";
@@ -43,11 +50,14 @@ export interface LicensingServiceDeps {
   activationCodes: ActivationCodeRepository;
   activations: ActivationRepository;
   floatingLeases: FloatingLeaseRepository;
+  offline: OfflineRepository;
   revocations: RevocationRepository;
   audit: AuditRepository;
   tokenIssuer: TokenIssuer;
   /** Lease duration for a floating checkout/heartbeat. */
   floatingLeaseTtlSeconds: number;
+  /** Max validity (days) for an offline token when the license has no expiry. */
+  offlineTokenMaxDays: number;
 }
 
 export interface CreateLicenseInput {
@@ -483,6 +493,130 @@ export class LicensingService {
       metadata: { tokenId: issued.tokenId },
     });
     return { token: issued.token, licenseId };
+  }
+
+  // --- offline activation (air-gapped: signed request/response files) ---
+
+  /**
+   * Process an offline activation request file and produce a signed, device-bound
+   * response file. Idempotent by requestId (re-submitting returns the same
+   * response — no extra seat consumed), which also provides replay protection.
+   * The activation code plaintext is used only to look up its hash and is never
+   * stored or logged.
+   */
+  async generateOfflineResponse(request: OfflineRequestFile): Promise<OfflineResponseFile> {
+    if (request.kind !== "offline-request" || request.schemaVersion !== OFFLINE_SCHEMA_VERSION) {
+      throw new DomainError("VALIDATION", "unsupported offline request file");
+    }
+    if (!request.requestId || !request.deviceId || !request.activationCode) {
+      throw new DomainError("VALIDATION", "offline request is missing required fields");
+    }
+
+    // Idempotency / replay: already processed this requestId?
+    const prior = await this.d.offline.getResponse(request.requestId);
+    if (prior) {
+      return this.toResponseFile(prior);
+    }
+
+    const hash = this.d.codes.hash(request.activationCode);
+    const code = await this.d.activationCodes.findByHash(hash);
+    if (!code || code.status === "revoked") {
+      throw new DomainError("ACTIVATION_CODE_INVALID", "activation code is invalid");
+    }
+    const license = await this.d.licenses.get(code.licenseId);
+    if (!license) throw new DomainError("NOT_FOUND", "license not found");
+    if (license.status !== "active") {
+      throw new DomainError("LICENSE_NOT_ACTIVE", `license is ${license.status}`);
+    }
+
+    const now = this.d.clock.now();
+
+    // Register the device (consume a seat) unless it is already active.
+    const existing = await this.d.activations.findActiveByDevice(license.id, request.deviceId);
+    if (!existing) {
+      if (code.usedActivations >= code.maxActivations) {
+        throw new DomainError("ACTIVATION_CODE_CONSUMED", "activation code exhausted");
+      }
+      const activation: Activation = {
+        id: this.d.ids.next("act"),
+        licenseId: license.id,
+        activationCodeId: code.id,
+        deviceId: request.deviceId,
+        deviceLabel: request.deviceLabel ?? null,
+        status: "active",
+        activatedAt: now,
+        lastSeenAt: now,
+        deactivatedAt: null,
+      };
+      const created = await this.d.activations.createIfUnderSeatLimit(
+        activation,
+        license.maximumSeats,
+      );
+      if (!created) throw new DomainError("SEAT_LIMIT_REACHED", "maximum seats reached");
+      code.usedActivations += 1;
+      if (code.usedActivations >= code.maxActivations) {
+        code.status = "consumed";
+        code.consumedAt = now;
+      }
+      await this.d.activationCodes.update(code);
+    }
+
+    // Long-lived, device-bound token so the air-gapped client can run offline
+    // for the whole license term (bounded by OFFLINE_TOKEN_MAX_DAYS if perpetual).
+    const offlineExpiry =
+      license.expiresAt !== null
+        ? license.expiresAt
+        : now + this.d.offlineTokenMaxDays * 86400;
+    const issued = await this.d.tokenIssuer.issue(license, {
+      deviceBinding: hashDeviceBinding(request.deviceId),
+      expiresAtOverride: offlineExpiry,
+      offlineUntilOverride: offlineExpiry,
+    });
+
+    const response = {
+      requestId: request.requestId,
+      licenseId: license.id,
+      deviceId: request.deviceId,
+      token: issued.token,
+      issuedAt: now,
+    };
+    await this.d.offline.save(
+      {
+        requestId: request.requestId,
+        licenseId: license.id,
+        deviceId: request.deviceId,
+        createdAt: request.createdAt,
+        processedAt: now,
+      },
+      response,
+    );
+    await this.d.audit.append({
+      id: this.d.ids.next("evt"),
+      type: "offline.issued",
+      licenseId: license.id,
+      actor: `offline:${request.deviceId}`,
+      at: now,
+      metadata: { requestId: request.requestId },
+    });
+    return this.toResponseFile(response);
+  }
+
+  private toResponseFile(r: {
+    requestId: string;
+    licenseId: string;
+    deviceId: string;
+    token: string;
+    issuedAt: number;
+  }): OfflineResponseFile {
+    return {
+      schemaVersion: OFFLINE_SCHEMA_VERSION,
+      kind: "offline-response",
+      requestId: r.requestId,
+      licenseId: r.licenseId,
+      deviceId: r.deviceId,
+      token: r.token,
+      issuedAt: r.issuedAt,
+    };
   }
 
   // --- floating (concurrent) seats ---

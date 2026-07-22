@@ -16,11 +16,16 @@
  * device can patch checks. This design targets casual copying, license sharing,
  * expiry/revocation enforcement, and tamper-evidence — not unbreakable DRM.
  */
+import { randomUUID } from "node:crypto";
 import {
   verifyLicenseToken,
   publicKeyFromPem,
+  hashDeviceBinding,
+  OFFLINE_SCHEMA_VERSION,
   type LicenseClaims,
   type PublicKeyStore,
+  type OfflineRequestFile,
+  type OfflineResponseFile,
 } from "@vehiclevo/licensing-shared";
 import { LicensingError, LicensingErrorCode } from "./errors.js";
 import { systemClock } from "./adapters.js";
@@ -58,6 +63,7 @@ export type SnapshotStatus =
   | "expired"
   | "offline_exceeded"
   | "clock_tampered"
+  | "device_mismatch"
   | "not_activated"
   | "invalid";
 
@@ -168,6 +174,53 @@ export class LicensingClient {
   async deactivate(): Promise<void> {
     await this.cfg.store.clear();
     this.last = DENIED("not_activated", LicensingErrorCode.NotActivated, "none", false);
+  }
+
+  /**
+   * generateOfflineRequest() — produce a request file for air-gapped activation.
+   * No network. The host app writes this to disk; the user carries it to a
+   * connected machine / the portal, which returns a signed response file.
+   */
+  generateOfflineRequest(activationCode: string): OfflineRequestFile {
+    return {
+      schemaVersion: OFFLINE_SCHEMA_VERSION,
+      kind: "offline-request",
+      requestId: randomUUID(),
+      deviceId: this.cfg.deviceId,
+      deviceLabel: this.cfg.deviceLabel ?? null,
+      activationCode,
+      createdAt: this.clock.now(),
+    };
+  }
+
+  /**
+   * importOfflineResponse() — verify and apply a signed offline response file.
+   * Verifies the token signature locally and that it is bound to THIS device,
+   * then activates offline with no server contact.
+   */
+  async importOfflineResponse(response: OfflineResponseFile): Promise<LicenseSnapshot> {
+    if (response?.kind !== "offline-response" || response.schemaVersion !== OFFLINE_SCHEMA_VERSION) {
+      throw new LicensingError(LicensingErrorCode.OfflineFileInvalid);
+    }
+    if (response.deviceId !== this.cfg.deviceId) {
+      throw new LicensingError(LicensingErrorCode.DeviceMismatch, "response device id mismatch");
+    }
+    const claims = this.verifyOrThrow(response.token);
+    if (
+      claims.deviceBinding !== null &&
+      claims.deviceBinding !== hashDeviceBinding(this.cfg.deviceId)
+    ) {
+      throw new LicensingError(LicensingErrorCode.DeviceMismatch);
+    }
+    const state: StoredState = {
+      licenseId: response.licenseId,
+      deviceId: this.cfg.deviceId,
+      token: response.token,
+      lastServerTime: claims.issuedAt,
+    };
+    await this.cfg.store.save(state);
+    this.last = this.snapshotFromToken(response.token, "offline_cache")!;
+    return this.last;
   }
 
   /**
@@ -402,6 +455,16 @@ export class LicensingClient {
     });
     if (!r.claims) return null;
     const c = r.claims;
+
+    // Device binding: a device-bound (e.g. offline) token is only valid on the
+    // device it was issued for. Prevents copying an offline file to another machine.
+    if (c.deviceBinding !== null && c.deviceBinding !== hashDeviceBinding(this.cfg.deviceId)) {
+      return {
+        ...DENIED("device_mismatch", LicensingErrorCode.DeviceMismatch, source),
+        offlineDaysRemaining: 0,
+      };
+    }
+
     const offlineDaysRemaining =
       c.offlineUntil == null
         ? 0

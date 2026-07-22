@@ -14,6 +14,8 @@ import type {
   ActivationCodeRecord,
   AuditEvent,
   FloatingLease,
+  OfflineRequestRecord,
+  OfflineResponseRecord,
   Product,
   Revocation,
 } from "../../domain/types.js";
@@ -26,6 +28,7 @@ import type {
   FloatingLeaseRepository,
   LicenseQuery,
   LicenseRepository,
+  OfflineRepository,
   ProductRepository,
   RevocationRepository,
 } from "../../application/ports.js";
@@ -385,6 +388,29 @@ export class PgRevocationRepository implements RevocationRepository {
     const { rows } = await this.pool.query("SELECT * FROM revocations WHERE license_id=$1", [licenseId]);
     const r = rows[0];
     return r ? { licenseId: r.license_id, reason: r.reason, revokedAt: Number(r.revoked_at) } : null;
+  }
+}
+
+export class PgOfflineRepository implements OfflineRepository {
+  constructor(private readonly pool: Pool) {}
+  async getResponse(requestId: string): Promise<OfflineResponseRecord | null> {
+    const { rows } = await this.pool.query("SELECT * FROM offline_responses WHERE request_id=$1", [requestId]);
+    const r = rows[0];
+    return r
+      ? { requestId: r.request_id, licenseId: r.license_id, deviceId: r.device_id, token: r.token, issuedAt: Number(r.issued_at) }
+      : null;
+  }
+  async save(request: OfflineRequestRecord, response: OfflineResponseRecord): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      await client.query(
+        "INSERT INTO offline_requests (request_id, license_id, device_id, created_at, processed_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (request_id) DO NOTHING",
+        [request.requestId, request.licenseId, request.deviceId, request.createdAt, request.processedAt],
+      );
+      await client.query(
+        "INSERT INTO offline_responses (request_id, license_id, device_id, token, issued_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (request_id) DO NOTHING",
+        [response.requestId, response.licenseId, response.deviceId, response.token, response.issuedAt],
+      );
+    });
   }
 }
 

@@ -10,6 +10,8 @@ import type {
   ActivationCodeRecord,
   AuditEvent,
   FloatingLease,
+  OfflineRequestRecord,
+  OfflineResponseRecord,
   Product,
   Revocation,
 } from "../../domain/types.js";
@@ -22,6 +24,7 @@ import type {
   FloatingLeaseRepository,
   LicenseQuery,
   LicenseRepository,
+  OfflineRepository,
   ProductRepository,
   RevocationRepository,
 } from "../../application/ports.js";
@@ -226,6 +229,18 @@ export class InMemoryFloatingLeaseRepository implements FloatingLeaseRepository 
       .filter((l) => l.licenseId === licenseId && this.isActive(l, now))
       .sort((a, b) => a.acquiredAt - b.acquiredAt)
       .map(clone);
+  }
+}
+
+export class InMemoryOfflineRepository implements OfflineRepository {
+  private responses = new Map<string, OfflineResponseRecord>();
+  private requests = new Map<string, OfflineRequestRecord>();
+  async getResponse(requestId: string): Promise<OfflineResponseRecord | null> {
+    return this.responses.has(requestId) ? clone(this.responses.get(requestId)!) : null;
+  }
+  async save(request: OfflineRequestRecord, response: OfflineResponseRecord): Promise<void> {
+    this.requests.set(request.requestId, clone(request));
+    this.responses.set(response.requestId, clone(response));
   }
 }
 

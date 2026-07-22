@@ -59,6 +59,23 @@ export interface FloatingLease {
   releasedAt: number | null;
 }
 
+/** Persisted offline activation request (never stores the plaintext code). */
+export interface OfflineRequestRecord {
+  requestId: string;
+  licenseId: string;
+  deviceId: string;
+  createdAt: number;
+  processedAt: number;
+}
+
+export interface OfflineResponseRecord {
+  requestId: string;
+  licenseId: string;
+  deviceId: string;
+  token: string;
+  issuedAt: number;
+}
+
 export type AuditEventType =
   | "product.created"
   | "license.created"
@@ -73,7 +90,8 @@ export type AuditEventType =
   | "activation_reset.requested"
   | "license_file.downloaded"
   | "floating.checkout"
-  | "floating.return";
+  | "floating.return"
+  | "offline.issued";
 
 export interface AuditEvent {
   id: string;

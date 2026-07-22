@@ -197,6 +197,24 @@ try {
 }
 ```
 
+### Offline (air-gapped) activation
+```ts
+// 1) On the air-gapped machine — no network needed:
+const request = licensing.generateOfflineRequest(activationCode);
+writeFile("request.json", JSON.stringify(request));   // carry to a connected machine / portal
+
+// 2) A connected machine / the portal submits it:
+//    POST /api/v1/offline/response  -> downloads response.json (signed, device-bound)
+
+// 3) Back on the air-gapped machine — verified locally, still no network:
+const snap = await licensing.importOfflineResponse(JSON.parse(readFile("response.json")));
+if (snap.ok) enableApp();
+```
+The response embeds a signed, **device-bound** license token with a long
+`offlineUntil`, so the machine runs offline for the license term. Re-submitting
+the same request is idempotent (no extra seat), and a response file copied to a
+different device is rejected (`DeviceMismatch`).
+
 ### Logout / deactivate & graceful shutdown
 ```ts
 await licensing.deactivate();          // clears local activation

@@ -17,6 +17,8 @@ export enum LicensingErrorCode {
   SeatUnavailable = "SEAT_UNAVAILABLE",
   LeaseExpired = "LEASE_EXPIRED",
   NoActiveLease = "NO_ACTIVE_LEASE",
+  DeviceMismatch = "DEVICE_MISMATCH",
+  OfflineFileInvalid = "OFFLINE_FILE_INVALID",
 }
 
 /** Human-friendly messages — safe to surface to end users. */
@@ -38,6 +40,8 @@ const MESSAGES: Record<LicensingErrorCode, string> = {
   [LicensingErrorCode.SeatUnavailable]: "All concurrent seats are currently in use. Please try again shortly.",
   [LicensingErrorCode.LeaseExpired]: "Your concurrent seat has expired. Reconnecting…",
   [LicensingErrorCode.NoActiveLease]: "No concurrent seat is currently checked out.",
+  [LicensingErrorCode.DeviceMismatch]: "This license file was issued for a different device.",
+  [LicensingErrorCode.OfflineFileInvalid]: "The offline activation file is invalid or corrupted.",
 };
 
 export class LicensingError extends Error {

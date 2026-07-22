@@ -5,6 +5,8 @@ import type {
   Activation,
   AuditEvent,
   FloatingLease,
+  OfflineRequestRecord,
+  OfflineResponseRecord,
   Product,
   Revocation,
 } from "../domain/types.js";
@@ -109,6 +111,13 @@ export interface FloatingLeaseRepository {
   release(leaseId: string, deviceId: string, now: number): Promise<boolean>;
   countActive(licenseId: string, now: number): Promise<number>;
   listActive(licenseId: string, now: number): Promise<FloatingLease[]>;
+}
+
+export interface OfflineRepository {
+  /** Returns the already-issued response for a requestId (idempotency/replay). */
+  getResponse(requestId: string): Promise<OfflineResponseRecord | null>;
+  /** Persist the request + its issued response together. */
+  save(request: OfflineRequestRecord, response: OfflineResponseRecord): Promise<void>;
 }
 
 export interface AuditQuery {

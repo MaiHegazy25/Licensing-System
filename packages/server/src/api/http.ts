@@ -241,6 +241,16 @@ export function buildHttpServer(container: Container): FastifyInstance {
     return reply.code(code).send(result);
   });
 
+  // --- Client: offline activation (air-gapped) ---
+  // Accepts a signed-request file, returns a signed-response file. Public like
+  // /activate — the activation code in the request is the credential.
+  app.post("/api/v1/offline/response", async (req, reply) => {
+    const response = await container.service.generateOfflineResponse(req.body as never);
+    return reply
+      .header("content-disposition", `attachment; filename="offline-response-${response.requestId}.json"`)
+      .send(response);
+  });
+
   // --- Client: floating (concurrent) seats ---
   app.post("/api/v1/floating/checkout", async (req, reply) => {
     const body = req.body as { licenseId: string; deviceId: string; deviceLabel?: string };
