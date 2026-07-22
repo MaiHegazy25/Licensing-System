@@ -1,1 +1,138 @@
-# Licensing-System
+# Vehiclevo Licensing System
+
+A centralized platform to sell, issue, activate, validate, renew, suspend,
+revoke and audit licenses for Vehiclevo's commercial software — plus a reusable
+client SDK that tools embed **without** access to internal administration.
+
+> **Status:** Stage 3 vertical slice implemented and tested. Stages 2 (design
+> docs) delivered under `docs/`. Extended features (offline files, floating,
+> portals, KMS, reporting) are designed and phased — see
+> `docs/architecture.md` §8. Items not yet built are marked _(planned)_.
+
+## Honest security note
+
+Client-side licensing **raises the cost** of bypassing licensing but **cannot
+make software uncrackable**. An attacker in full control of a device can patch
+checks. This system targets casual copying, license sharing, and reliable
+expiry/revocation enforcement with tamper-evidence — not unbreakable DRM. The
+strongest guarantees are server-side (revocation, seat caps, audit); the SDK
+enforces signed, time-bounded entitlements and fails **safe**.
+
+## Layout
+
+```
+packages/
+  shared/   canonical JSON + Ed25519 token sign/verify (used by server AND sdk)
+  server/   domain (license state machine) · app services · signing · API · migrations
+  sdk/      client SDK: init/activate/validate/hasFeature/offline/rollback
+docs/       architecture · threat-model · license-lifecycle · ADRs
+```
+
+Design principle: `domain` depends on nothing; `application` on `domain`+ports;
+`infrastructure` implements ports; the SDK shares only `shared` — never server
+internals or private keys.
+
+## Quickstart (local dev)
+
+```bash
+npm install
+npm test                 # 16 tests: crypto/token, e2e slice, SDK offline/rollback
+npm run build            # compile all packages
+
+# generate a DEV signing keypair (gitignored; never commit private keys)
+node --loader ts-node/esm packages/server/scripts/keygen.ts key-2026-01 ./keys/local
+cp .env.example .env     # then set ACTIVE_SIGNING_KEY_ID + ACTIVATION_CODE_PEPPER
+npm start -w @vehiclevo/licensing-server
+```
+
+The vertical slice runs on in-memory repositories (zero external deps). The
+Postgres schema lives in `packages/server/migrations/001_init.sql`; the docker
+compose file provisions a local database.
+
+## What the slice proves (Stage 3)
+
+`admin creates product + license → generates activation code → SDK activates →
+SDK verifies the signed token locally → app gates a feature → admin revokes →
+SDK detects revocation on next online validation`, plus seat-limit enforcement,
+offline operation within the signed window, and clock-rollback detection. All
+covered by `packages/**/__tests__`.
+
+## SDK integration examples
+
+### Startup
+```ts
+import { initializeLicensing, FetchHttpClient, FileTokenStore } from "@vehiclevo/licensing-sdk";
+
+const licensing = await initializeLicensing({
+  serverUrl: "https://licensing.vehiclevo.example",
+  expectedIssuer: "https://licensing.vehiclevo.example",
+  expectedAudience: "vehiclevo-products",
+  deviceId: deriveDeviceId(),                 // salted/derived — NOT a raw MAC
+  publicKeys: [{ kid: "key-2026-01", pem: EMBEDDED_PUBLIC_KEY_PEM }],
+  http: new FetchHttpClient("https://licensing.vehiclevo.example"),
+  store: new FileTokenStore(appDataPath("license.json")), // wrap OS keychain in prod
+});
+
+const status = await licensing.validateLicense();
+if (!status.ok) showLicensingScreen(status);  // fails safe: features stay off
+```
+
+### Periodic validation
+```ts
+setInterval(() => { void licensing.validateLicense(); }, 6 * 60 * 60 * 1000);
+```
+
+### Feature gating (not a single bypassable gate — re-check at the call site)
+```ts
+function exportPdf() {
+  if (!licensing.hasFeature("export_pdf")) {
+    throw new Error(licensing.getLicenseStatus().reason ?? "not licensed");
+  }
+  // ... perform export
+}
+```
+
+### Activation
+```ts
+try {
+  const snap = await licensing.activate(userEnteredCode);
+  console.log("activated:", snap.edition, snap.features);
+} catch (e) {
+  showError((e as LicensingError).userMessage); // friendly, safe message
+}
+```
+
+### Logout / deactivate & graceful shutdown
+```ts
+await licensing.deactivate();          // clears local activation
+// on shutdown just stop the validation timer; the signed cache persists
+```
+
+### Offline visibility
+```ts
+const daysLeft = licensing.getOfflineDaysRemaining();
+```
+
+Every dependency (`http`, `store`, `clock`) is injectable, so host-app tests
+mock the network and control time deterministically — see
+`packages/sdk/src/__tests__/offline.test.ts`.
+
+## Signed token claims
+
+See `packages/shared/src/token.ts` (`LicenseClaims`). Highlights: `schemaVersion`,
+`tokenId` (jti), `licenseId`, `customerId`, `organizationId`, `productId`,
+`edition`, `enabledFeatures`, `licenseType`, `issuedAt/notBefore/expiresAt`,
+`maintenanceExpiresAt`, `maximumSeats`, `deviceBinding`, `offlineUntil`,
+`gracePeriodSeconds`, `issuer/audience`, `kid`.
+
+## Security posture (implemented)
+
+- Ed25519 signatures; canonical JSON payload; `kid`-based rotation support.
+- Private keys never in client or repo; `local` provider blocked in production.
+- Activation codes: high-entropy, HMAC(pepper) hashed at rest, use-limited,
+  constant-time compare.
+- Fail-safe SDK; offline window + grace; clock-rollback detection.
+- Opaque UUID ids; audit events without secrets; structured logs never carry
+  tokens/codes/keys.
+
+See `docs/threat-model.md` for the full threat table and residual risks.
