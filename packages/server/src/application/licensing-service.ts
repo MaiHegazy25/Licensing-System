@@ -377,6 +377,107 @@ export class LicensingService {
     return this.d.audit.query({ licenseId, limit: 200 });
   }
 
+  // --- customer self-service (STRICTLY scoped to the caller's customerId) ---
+
+  /** Throws NOT_FOUND if the license does not exist OR is not owned by the caller. */
+  private async requireOwnedLicense(customerId: string, licenseId: string): Promise<License> {
+    const license = await this.d.licenses.get(licenseId);
+    // Same error whether missing or not-owned — never leak another customer's ids.
+    if (!license || license.customerId !== customerId) {
+      throw new DomainError("NOT_FOUND", "license not found");
+    }
+    return license;
+  }
+
+  async getCustomerLicenses(customerId: string): Promise<License[]> {
+    const { items } = await this.d.licenses.list({ customerId, limit: 200 });
+    return items;
+  }
+
+  /** Customer-safe detail: entitlements, dates, seat usage, own devices. No internal audit. */
+  async getCustomerLicenseDetail(
+    customerId: string,
+    licenseId: string,
+  ): Promise<{
+    license: License;
+    seatsUsed: number;
+    devices: Activation[];
+    revoked: boolean;
+  }> {
+    const license = await this.requireOwnedLicense(customerId, licenseId);
+    const [devices, revoked] = await Promise.all([
+      this.d.activations.listByLicense(licenseId),
+      this.d.revocations.isRevoked(licenseId),
+    ]);
+    const seatsUsed = devices.filter((d) => d.status === "active").length;
+    return { license, seatsUsed, devices, revoked };
+  }
+
+  /** Self-service device deactivation (frees a seat; enables transfer). */
+  async deactivateDevice(
+    customerId: string,
+    licenseId: string,
+    activationId: string,
+  ): Promise<void> {
+    await this.requireOwnedLicense(customerId, licenseId);
+    const activation = await this.d.activations.get(activationId);
+    if (!activation || activation.licenseId !== licenseId) {
+      throw new DomainError("NOT_FOUND", "device not found");
+    }
+    if (activation.status === "active") {
+      const now = this.d.clock.now();
+      activation.status = "deactivated";
+      activation.deactivatedAt = now;
+      await this.d.activations.update(activation);
+      await this.d.audit.append({
+        id: this.d.ids.next("evt"),
+        type: "device.deactivated",
+        licenseId,
+        actor: `customer:${customerId}`,
+        at: now,
+        metadata: { activationId, self_service: true },
+      });
+    }
+  }
+
+  /** Record a customer's activation-reset request for support to action. */
+  async requestActivationReset(
+    customerId: string,
+    licenseId: string,
+    note = "",
+  ): Promise<void> {
+    await this.requireOwnedLicense(customerId, licenseId);
+    await this.d.audit.append({
+      id: this.d.ids.next("evt"),
+      type: "activation_reset.requested",
+      licenseId,
+      actor: `customer:${customerId}`,
+      at: this.d.clock.now(),
+      metadata: { note: note.slice(0, 500) },
+    });
+  }
+
+  /** Issue a downloadable signed license file (token) for an owned, live license. */
+  async downloadLicenseFile(
+    customerId: string,
+    licenseId: string,
+  ): Promise<{ token: string; licenseId: string }> {
+    const license = await this.requireOwnedLicense(customerId, licenseId);
+    if (license.status === "revoked" || (await this.d.revocations.isRevoked(licenseId))) {
+      throw new DomainError("LICENSE_NOT_ACTIVE", "license is revoked");
+    }
+    const issued = await this.d.tokenIssuer.issue(license);
+    await this.d.audit.append({
+      id: this.d.ids.next("evt"),
+      type: "license_file.downloaded",
+      licenseId,
+      actor: `customer:${customerId}`,
+      at: this.d.clock.now(),
+      metadata: { tokenId: issued.tokenId },
+    });
+    return { token: issued.token, licenseId };
+  }
+
   private async transition(
     licenseId: string,
     to: LicenseStatus,

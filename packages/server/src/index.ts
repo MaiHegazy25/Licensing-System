@@ -8,6 +8,7 @@ export * from "./application/auth.js";
 export * from "./infrastructure/auth/api-key-resolver.js";
 export * from "./infrastructure/auth/oidc-resolver.js";
 export * from "./infrastructure/auth/resolver-factory.js";
+export * from "./infrastructure/auth/customer-api-key-resolver.js";
 export * from "./application/licensing-service.js";
 export * from "./application/ports.js";
 export * from "./application/token-issuer.js";

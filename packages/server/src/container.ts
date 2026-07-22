@@ -41,12 +41,14 @@ import type {
   RevocationRepository,
 } from "./application/ports.js";
 import { buildPrincipalResolver } from "./infrastructure/auth/resolver-factory.js";
-import type { PrincipalResolver } from "./application/auth.js";
+import { CustomerApiKeyResolver } from "./infrastructure/auth/customer-api-key-resolver.js";
+import type { PrincipalResolver, CustomerPrincipalResolver } from "./application/auth.js";
 
 export interface Container {
   service: LicensingService;
   keyProvider: SigningKeyProvider;
   principals: PrincipalResolver;
+  customerPrincipals: CustomerPrincipalResolver;
   config: AppConfig;
   audit: AuditRepository;
   /** Underlying pool when Postgres-backed (for migrations / shutdown); else null. */
@@ -130,11 +132,13 @@ export function buildContainer(
   });
 
   const principals = buildPrincipalResolver();
+  const customerPrincipals = CustomerApiKeyResolver.fromEnv();
 
   return {
     service,
     keyProvider,
     principals,
+    customerPrincipals,
     config: cfg,
     audit: repos.audit,
     pool: repos.pool,

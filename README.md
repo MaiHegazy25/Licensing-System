@@ -117,6 +117,26 @@ Either way the **same permission matrix** enforces access; routes are unchanged.
 Backend endpoints live under `/api/v1/admin/*` with CORS for the SPA origin
 (`ADMIN_WEB_ORIGIN`).
 
+## Customer portal
+
+A separate React SPA (`packages/customer-web`) for end customers — no access to
+internal administration. Customers can view their licenses, enabled features,
+expiry/maintenance dates and seat usage; view and **deactivate their own
+devices** (freeing a seat, enabling transfer); **download a signed license
+file**; and **request an activation reset**.
+
+```bash
+npm run dev -w @vehiclevo/licensing-customer-web    # http://localhost:5174
+npm run build -w @vehiclevo/licensing-customer-web
+```
+
+The customer API lives under `/api/v1/customer/*` and is **strictly scoped to
+the authenticated customer** — every response is filtered to their `customerId`,
+and any attempt to read or act on another customer's license returns `404` (no
+existence leak). Auth for the slice is customer access keys (`CUSTOMER_API_KEYS`)
+behind a `CustomerPrincipalResolver` port; production swaps in a customer
+OIDC/B2C resolver. Isolation is covered by tests (`customer-api.test.ts`).
+
 ## SDK integration examples
 
 ### Startup

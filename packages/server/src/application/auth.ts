@@ -20,3 +20,18 @@ export interface PrincipalResolver {
   /** True when the resolver is configured (else auth is unconfigured). */
   isConfigured(): boolean;
 }
+
+/**
+ * A customer-portal caller. Scoped to a single customer — every customer API
+ * response MUST be filtered to this customerId (no cross-customer access).
+ */
+export interface CustomerPrincipal {
+  customerId: string;
+  /** Optional end-user subject within the customer (for audit). */
+  subject: string;
+}
+
+export interface CustomerPrincipalResolver {
+  resolve(bearerToken: string | null): Promise<CustomerPrincipal | null>;
+  isConfigured(): boolean;
+}

@@ -10,7 +10,7 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { permissionsForRole, roleHasPermission, type Permission } from "../domain/rbac.js";
-import type { Principal } from "../application/auth.js";
+import type { Principal, CustomerPrincipal } from "../application/auth.js";
 import type { Container } from "../container.js";
 
 const HTTP_FOR_CODE: Record<DomainErrorCode, number> = {
@@ -238,6 +238,57 @@ export function buildHttpServer(container: Container): FastifyInstance {
     const result = await container.service.validate(body);
     const code = result.status === "valid" ? 200 : 403;
     return reply.code(code).send(result);
+  });
+
+  // --- Customer portal (scoped to the authenticated customerId) ---
+  const authenticateCustomer = async (req: FastifyRequest): Promise<CustomerPrincipal> => {
+    if (!container.customerPrincipals.isConfigured()) {
+      throw new DomainError("VALIDATION", "customer auth not configured (set CUSTOMER_API_KEYS)");
+    }
+    const principal = await container.customerPrincipals.resolve(bearer(req));
+    if (!principal) throw httpError(401, "unauthorized");
+    return principal;
+  };
+
+  app.get("/api/v1/customer/me", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    return reply.send({ customerId: c.customerId, subject: c.subject });
+  });
+
+  app.get("/api/v1/customer/licenses", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const items = await container.service.getCustomerLicenses(c.customerId);
+    return reply.send({ items });
+  });
+
+  app.get("/api/v1/customer/licenses/:id", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const { id } = req.params as { id: string };
+    return reply.send(await container.service.getCustomerLicenseDetail(c.customerId, id));
+  });
+
+  app.post("/api/v1/customer/licenses/:id/devices/:activationId/deactivate", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const { id, activationId } = req.params as { id: string; activationId: string };
+    await container.service.deactivateDevice(c.customerId, id, activationId);
+    return reply.code(204).send();
+  });
+
+  app.post("/api/v1/customer/licenses/:id/activation-reset", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { note?: string };
+    await container.service.requestActivationReset(c.customerId, id, body.note ?? "");
+    return reply.code(202).send({ status: "requested" });
+  });
+
+  app.get("/api/v1/customer/licenses/:id/license-file", async (req, reply) => {
+    const c = await authenticateCustomer(req);
+    const { id } = req.params as { id: string };
+    const file = await container.service.downloadLicenseFile(c.customerId, id);
+    return reply
+      .header("content-disposition", `attachment; filename="license-${id}.json"`)
+      .send(file);
   });
 
   return app;

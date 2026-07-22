@@ -135,7 +135,8 @@ endpoints exist today (`/health`, `/ready`).
 | RBAC — five roles, permission matrix, per-endpoint enforcement | ✅ implemented + tested (see ADR-0005) |
 | Postgres adapters + migration runner, wired end-to-end | ✅ implemented + integration-tested (incl. concurrent seat cap) |
 | OIDC auth (Entra ID/Keycloak) behind auth port | ✅ RS256 JWT + JWKS + role mapping, resolver-selectable via AUTH_MODE (API-key resolver remains for dev) |
-| Offline file req/resp, trials, transfer | ⏳ planned (P3) |
-| Floating leases (atomic checkout) | ⏳ schema ready; logic planned (P4) |
-| Customer portal | ⏳ planned (P5) |
+| Customer portal (React SPA) + scoped API | ✅ view licenses/features/dates, seat usage, view + deactivate devices, download license file, request reset; strict per-customer isolation + tests |
+| Device transfer (via self-service deactivation freeing a seat) | ✅ deactivation frees a seat; full transfer UX ⏳ |
+| Offline file req/resp, trials | ⏳ planned |
+| Floating leases (atomic checkout) | ⏳ schema ready; seat-lock primitive in place; lease logic planned |
 | Reporting, key rotation runbook, monitoring | ⏳ planned (P6) |
