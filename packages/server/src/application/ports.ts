@@ -64,6 +64,13 @@ export interface ActivationRepository {
   findActiveByDevice(licenseId: string, deviceId: string): Promise<Activation | null>;
   update(a: Activation): Promise<void>;
   listByLicense(licenseId: string): Promise<Activation[]>;
+  /**
+   * Atomically create the activation ONLY if the license's active-seat count is
+   * below `maxSeats`. Returns true if created, false if the seat cap would be
+   * exceeded. Must be race-free under concurrency (SQL conditional insert /
+   * row lock in Postgres) so the system never issues more seats than allowed.
+   */
+  createIfUnderSeatLimit(a: Activation, maxSeats: number): Promise<boolean>;
 }
 
 export interface RevocationRepository {

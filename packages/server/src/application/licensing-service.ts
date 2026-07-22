@@ -193,10 +193,6 @@ export class LicensingService {
       input.deviceId,
     );
     if (!existing) {
-      const activeCount = await this.d.activations.countActive(license.id);
-      if (activeCount >= license.maximumSeats) {
-        throw new DomainError("SEAT_LIMIT_REACHED", "maximum seats reached");
-      }
       if (code.usedActivations >= code.maxActivations) {
         throw new DomainError("ACTIVATION_CODE_CONSUMED", "activation code exhausted");
       }
@@ -212,7 +208,15 @@ export class LicensingService {
         lastSeenAt: now,
         deactivatedAt: null,
       };
-      await this.d.activations.create(activation);
+      // Atomic seat-cap enforcement: the repository refuses the insert if the
+      // active-seat count is already at the limit (race-free under concurrency).
+      const created = await this.d.activations.createIfUnderSeatLimit(
+        activation,
+        license.maximumSeats,
+      );
+      if (!created) {
+        throw new DomainError("SEAT_LIMIT_REACHED", "maximum seats reached");
+      }
       code.usedActivations += 1;
       if (code.usedActivations >= code.maxActivations) {
         code.status = "consumed";

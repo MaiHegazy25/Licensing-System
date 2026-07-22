@@ -1,8 +1,10 @@
 /**
- * Composition root. Wires ports to adapters. The vertical slice uses in-memory
- * repositories (zero external deps to run the demo); the Postgres adapters and
- * migrations exist for the production path and are selected when DATABASE_URL
- * is set (wired in a later phase).
+ * Composition root. Wires ports to adapters.
+ *
+ * Persistence is selected by config: when `databaseUrl` is set the Postgres
+ * adapters are used; otherwise in-memory adapters run the demo/tests with zero
+ * external dependencies. Both implement the same repository ports, so the
+ * application/domain layers are unaware of the choice.
  */
 import type { AppConfig } from "./config.js";
 import { LicensingService } from "./application/licensing-service.js";
@@ -20,7 +22,24 @@ import {
   InMemoryProductRepository,
   InMemoryRevocationRepository,
 } from "./infrastructure/persistence/memory.js";
-import type { Clock } from "./application/ports.js";
+import {
+  PgActivationCodeRepository,
+  PgActivationRepository,
+  PgAuditRepository,
+  PgLicenseRepository,
+  PgProductRepository,
+  PgRevocationRepository,
+} from "./infrastructure/persistence/postgres.js";
+import { createPool, type Pool } from "./infrastructure/persistence/pool.js";
+import type {
+  ActivationCodeRepository,
+  ActivationRepository,
+  AuditRepository,
+  Clock,
+  LicenseRepository,
+  ProductRepository,
+  RevocationRepository,
+} from "./application/ports.js";
 import { ApiKeyPrincipalResolver } from "./infrastructure/auth/api-key-resolver.js";
 import type { PrincipalResolver } from "./application/auth.js";
 
@@ -29,7 +48,45 @@ export interface Container {
   keyProvider: SigningKeyProvider;
   principals: PrincipalResolver;
   config: AppConfig;
-  audit: InMemoryAuditRepository;
+  audit: AuditRepository;
+  /** Underlying pool when Postgres-backed (for migrations / shutdown); else null. */
+  pool: Pool | null;
+  /** Release resources (closes the pool if any). */
+  close(): Promise<void>;
+}
+
+interface RepoSet {
+  products: ProductRepository;
+  licenses: LicenseRepository;
+  activationCodes: ActivationCodeRepository;
+  activations: ActivationRepository;
+  revocations: RevocationRepository;
+  audit: AuditRepository;
+  pool: Pool | null;
+}
+
+function buildRepos(cfg: AppConfig): RepoSet {
+  if (cfg.databaseUrl) {
+    const pool = createPool(cfg.databaseUrl);
+    return {
+      products: new PgProductRepository(pool),
+      licenses: new PgLicenseRepository(pool),
+      activationCodes: new PgActivationCodeRepository(pool),
+      activations: new PgActivationRepository(pool),
+      revocations: new PgRevocationRepository(pool),
+      audit: new PgAuditRepository(pool),
+      pool,
+    };
+  }
+  return {
+    products: new InMemoryProductRepository(),
+    licenses: new InMemoryLicenseRepository(),
+    activationCodes: new InMemoryActivationCodeRepository(),
+    activations: new InMemoryActivationRepository(),
+    revocations: new InMemoryRevocationRepository(),
+    audit: new InMemoryAuditRepository(),
+    pool: null,
+  };
 }
 
 export function buildContainer(
@@ -47,7 +104,7 @@ export function buildContainer(
     LocalKeyProvider.fromDirectory(cfg.localKeysDir, cfg.activeSigningKeyId);
 
   const ids = new UuidIdGenerator();
-  const audit = new InMemoryAuditRepository();
+  const repos = buildRepos(cfg);
   const tokenIssuer = new SigningTokenIssuer(
     keyProvider,
     {
@@ -63,16 +120,26 @@ export function buildContainer(
     clock,
     ids,
     codes: new HmacActivationCodeService(cfg.activationCodePepper),
-    products: new InMemoryProductRepository(),
-    licenses: new InMemoryLicenseRepository(),
-    activationCodes: new InMemoryActivationCodeRepository(),
-    activations: new InMemoryActivationRepository(),
-    revocations: new InMemoryRevocationRepository(),
-    audit,
+    products: repos.products,
+    licenses: repos.licenses,
+    activationCodes: repos.activationCodes,
+    activations: repos.activations,
+    revocations: repos.revocations,
+    audit: repos.audit,
     tokenIssuer,
   });
 
   const principals = ApiKeyPrincipalResolver.fromEnv();
 
-  return { service, keyProvider, principals, config: cfg, audit };
+  return {
+    service,
+    keyProvider,
+    principals,
+    config: cfg,
+    audit: repos.audit,
+    pool: repos.pool,
+    async close() {
+      if (repos.pool) await repos.pool.end();
+    },
+  };
 }

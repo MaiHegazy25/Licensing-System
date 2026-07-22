@@ -127,6 +127,16 @@ export class InMemoryActivationRepository implements ActivationRepository {
   async update(a: Activation): Promise<void> {
     this.byId.set(a.id, clone(a));
   }
+  async createIfUnderSeatLimit(a: Activation, maxSeats: number): Promise<boolean> {
+    // Single-threaded event loop: this check-then-insert is already atomic.
+    let active = 0;
+    for (const x of this.byId.values()) {
+      if (x.licenseId === a.licenseId && x.status === "active") active++;
+    }
+    if (active >= maxSeats) return false;
+    this.byId.set(a.id, clone(a));
+    return true;
+  }
   async listByLicense(licenseId: string): Promise<Activation[]> {
     return [...this.byId.values()]
       .filter((a) => a.licenseId === licenseId)

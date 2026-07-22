@@ -46,9 +46,21 @@ cp .env.example .env     # then set ACTIVE_SIGNING_KEY_ID + ACTIVATION_CODE_PEPP
 npm start -w @vehiclevo/licensing-server
 ```
 
-The vertical slice runs on in-memory repositories (zero external deps). The
-Postgres schema lives in `packages/server/migrations/001_init.sql`; the docker
-compose file provisions a local database.
+By default the server runs on **in-memory** repositories (zero external deps).
+Set `DATABASE_URL` to switch to **Postgres**: the server applies pending
+migrations on startup (idempotent, tracked in `schema_migrations`) and uses the
+`pg`-backed adapters. Seat checkout is enforced atomically with a
+`SELECT … FOR UPDATE` row lock, so concurrent activations can never oversell.
+
+```bash
+docker compose up -d db                 # local Postgres
+export DATABASE_URL=postgres://licensing:licensing@localhost:5432/licensing
+npm run migrate -w @vehiclevo/licensing-server   # or let startup auto-apply
+npm start -w @vehiclevo/licensing-server
+
+# Postgres integration tests (skipped unless a DB is provided):
+TEST_DATABASE_URL=$DATABASE_URL npm test
+```
 
 ## What the slice proves (Stage 3)
 

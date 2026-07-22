@@ -16,4 +16,7 @@ export * from "./infrastructure/signing/key-provider.js";
 export * from "./infrastructure/signing/local-key-provider.js";
 export * from "./infrastructure/signing/token-issuer.js";
 export * from "./infrastructure/persistence/memory.js";
+export * from "./infrastructure/persistence/postgres.js";
+export * from "./infrastructure/persistence/pool.js";
+export * from "./infrastructure/persistence/migrate.js";
 export * from "./api/http.js";
