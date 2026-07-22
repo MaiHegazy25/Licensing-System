@@ -31,6 +31,8 @@ import type {
   OfflineRepository,
   ProductRepository,
   RevocationRepository,
+  SecurityEvent,
+  SecurityEventRepository,
 } from "../../application/ports.js";
 import type { Pool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -206,6 +208,29 @@ export class PgActivationCodeRepository implements ActivationCodeRepository {
       [licenseId],
     );
     return rows.map(toCode);
+  }
+  async consumeUse(id: string, now: number): Promise<boolean> {
+    // Atomic conditional increment: the WHERE clause guarantees the counter can
+    // never pass max_activations, no matter how many requests race.
+    const { rowCount } = await this.pool.query(
+      `UPDATE activation_codes SET
+         used_activations = used_activations + 1,
+         status = CASE WHEN used_activations + 1 >= max_activations THEN 'consumed' ELSE status END,
+         consumed_at = CASE WHEN used_activations + 1 >= max_activations THEN $2::bigint ELSE consumed_at END
+       WHERE id = $1 AND status <> 'revoked' AND used_activations < max_activations`,
+      [id, now],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+  async releaseUse(id: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE activation_codes SET
+         used_activations = greatest(used_activations - 1, 0),
+         status = CASE WHEN status = 'consumed' THEN 'unused' ELSE status END,
+         consumed_at = CASE WHEN status = 'consumed' THEN NULL ELSE consumed_at END
+       WHERE id = $1`,
+      [id],
+    );
   }
 }
 
@@ -411,6 +436,16 @@ export class PgOfflineRepository implements OfflineRepository {
         [response.requestId, response.licenseId, response.deviceId, response.token, response.issuedAt],
       );
     });
+  }
+}
+
+export class PgSecurityEventRepository implements SecurityEventRepository {
+  constructor(private readonly pool: Pool) {}
+  async record(e: SecurityEvent): Promise<void> {
+    await this.pool.query(
+      "INSERT INTO security_events (id, type, subject, at, metadata) VALUES ($1,$2,$3,$4,$5::jsonb)",
+      [e.id, e.type, e.subject, e.at, JSON.stringify(e.metadata)],
+    );
   }
 }
 

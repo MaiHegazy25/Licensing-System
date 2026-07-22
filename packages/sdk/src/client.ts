@@ -170,8 +170,26 @@ export class LicensingClient {
     return this.last;
   }
 
-  /** deactivate() — clears local activation. (Server-side release is a later phase.) */
+  /**
+   * deactivate() — releases this device's seat on the server (best-effort,
+   * authenticated by presenting the stored signed token as proof of
+   * possession), returns any held floating seat, then clears local state.
+   * Local state is ALWAYS cleared even if the server is unreachable; the seat
+   * can then still be freed via the customer portal.
+   */
   async deactivate(): Promise<void> {
+    await this.returnSeat(); // no-op if no floating seat is held
+    const state = await this.cfg.store.load();
+    if (state) {
+      try {
+        await this.cfg.http.post("/api/v1/deactivate", {
+          token: state.token,
+          deviceId: state.deviceId,
+        });
+      } catch {
+        /* best effort — offline deactivation still clears locally */
+      }
+    }
     await this.cfg.store.clear();
     this.last = DENIED("not_activated", LicensingErrorCode.NotActivated, "none", false);
   }
@@ -267,6 +285,13 @@ export class LicensingClient {
       }
       if (body.status === "expired") {
         this.last = DENIED("expired", LicensingErrorCode.Expired);
+        return this.last;
+      }
+      if (body.status === "device_not_activated") {
+        // The server says this device holds no active seat (deactivated via a
+        // portal, or reset). Clear the stale cache — do NOT fall back offline.
+        await this.cfg.store.clear();
+        this.last = DENIED("not_activated", LicensingErrorCode.NotActivated, "none", false);
         return this.last;
       }
       // Unknown non-200 → treat as network-ish and fall back offline.

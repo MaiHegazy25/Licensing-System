@@ -27,6 +27,8 @@ import type {
   OfflineRepository,
   ProductRepository,
   RevocationRepository,
+  SecurityEvent,
+  SecurityEventRepository,
 } from "../../application/ports.js";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -95,6 +97,26 @@ export class InMemoryActivationCodeRepository implements ActivationCodeRepositor
   }
   async update(r: ActivationCodeRecord): Promise<void> {
     this.byId.set(r.id, clone(r));
+  }
+  async consumeUse(id: string, now: number): Promise<boolean> {
+    // Single-threaded event loop: check-then-increment is atomic here.
+    const r = this.byId.get(id);
+    if (!r || r.status === "revoked" || r.usedActivations >= r.maxActivations) return false;
+    r.usedActivations += 1;
+    if (r.usedActivations >= r.maxActivations) {
+      r.status = "consumed";
+      r.consumedAt = now;
+    }
+    return true;
+  }
+  async releaseUse(id: string): Promise<void> {
+    const r = this.byId.get(id);
+    if (!r) return;
+    r.usedActivations = Math.max(0, r.usedActivations - 1);
+    if (r.status === "consumed") {
+      r.status = "unused";
+      r.consumedAt = null;
+    }
   }
   async listByLicense(licenseId: string): Promise<ActivationCodeRecord[]> {
     return [...this.byId.values()]
@@ -253,5 +275,12 @@ export class InMemoryAuditRepository implements AuditRepository {
     let items = [...this.events].sort((a, b) => b.at - a.at);
     if (query.licenseId) items = items.filter((e) => e.licenseId === query.licenseId);
     return items.slice(0, query.limit ?? 100).map(clone);
+  }
+}
+
+export class InMemorySecurityEventRepository implements SecurityEventRepository {
+  readonly events: SecurityEvent[] = [];
+  async record(e: SecurityEvent): Promise<void> {
+    this.events.push(clone(e));
   }
 }

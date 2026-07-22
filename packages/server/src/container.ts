@@ -23,6 +23,7 @@ import {
   InMemoryOfflineRepository,
   InMemoryProductRepository,
   InMemoryRevocationRepository,
+  InMemorySecurityEventRepository,
 } from "./infrastructure/persistence/memory.js";
 import {
   PgActivationCodeRepository,
@@ -33,6 +34,7 @@ import {
   PgOfflineRepository,
   PgProductRepository,
   PgRevocationRepository,
+  PgSecurityEventRepository,
 } from "./infrastructure/persistence/postgres.js";
 import { createPool, type Pool } from "./infrastructure/persistence/pool.js";
 import type {
@@ -45,6 +47,7 @@ import type {
   OfflineRepository,
   ProductRepository,
   RevocationRepository,
+  SecurityEventRepository,
 } from "./application/ports.js";
 import { buildPrincipalResolver } from "./infrastructure/auth/resolver-factory.js";
 import { CustomerApiKeyResolver } from "./infrastructure/auth/customer-api-key-resolver.js";
@@ -57,6 +60,9 @@ export interface Container {
   customerPrincipals: CustomerPrincipalResolver;
   config: AppConfig;
   audit: AuditRepository;
+  securityEvents: SecurityEventRepository;
+  /** The clock everything runs on (injectable for deterministic tests). */
+  clock: Clock;
   /** Underlying pool when Postgres-backed (for migrations / shutdown); else null. */
   pool: Pool | null;
   /** Release resources (closes the pool if any). */
@@ -72,6 +78,7 @@ interface RepoSet {
   offline: OfflineRepository;
   revocations: RevocationRepository;
   audit: AuditRepository;
+  securityEvents: SecurityEventRepository;
   pool: Pool | null;
 }
 
@@ -87,6 +94,7 @@ function buildRepos(cfg: AppConfig): RepoSet {
       offline: new PgOfflineRepository(pool),
       revocations: new PgRevocationRepository(pool),
       audit: new PgAuditRepository(pool),
+      securityEvents: new PgSecurityEventRepository(pool),
       pool,
     };
   }
@@ -99,6 +107,7 @@ function buildRepos(cfg: AppConfig): RepoSet {
     offline: new InMemoryOfflineRepository(),
     revocations: new InMemoryRevocationRepository(),
     audit: new InMemoryAuditRepository(),
+    securityEvents: new InMemorySecurityEventRepository(),
     pool: null,
   };
 }
@@ -157,6 +166,8 @@ export function buildContainer(
     customerPrincipals,
     config: cfg,
     audit: repos.audit,
+    securityEvents: repos.securityEvents,
+    clock,
     pool: repos.pool,
     async close() {
       if (repos.pool) await repos.pool.end();

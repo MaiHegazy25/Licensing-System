@@ -140,5 +140,7 @@ endpoints exist today (`/health`, `/ready`).
 | Device transfer (via self-service deactivation freeing a seat) | ✅ deactivation frees a seat; full transfer UX ⏳ |
 | Floating/concurrent licenses (atomic checkout, heartbeat, return, expiry reclaim) | ✅ implemented + tested (incl. concurrent cap enforcement over Postgres); admin monitoring + SDK |
 | Offline activation (signed request/response files, device-bound, air-gapped) | ✅ implemented + tested; idempotent/replay-safe; SDK generate/import |
+| Rate limiting + security-event logging (per-IP fixed window, 429, security_events table) | ✅ baseline (per-instance; shared-store limiter ⏳) |
+| SDK-initiated deactivation (proof-of-possession token, frees the seat) | ✅ implemented + tested |
 | Trials, usage reporting/monitoring | ⏳ planned |
 | Reporting, key rotation runbook, monitoring | ⏳ planned (P6) |

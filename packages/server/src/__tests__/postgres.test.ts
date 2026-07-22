@@ -182,4 +182,27 @@ d("Postgres persistence", () => {
     );
     expect(Number(active.rows[0]!.n)).toBe(3); // DB agrees — cap held
   });
+
+  it("never over-consumes an activation code under parallel activation", async () => {
+    const product = await container.service.createProduct({ key: "vv-code-race", name: "CodeRace" });
+    const license = await container.service.createLicense({
+      customerId: "c", productId: product.id, edition: "e", enabledFeatures: [],
+      licenseType: "device", maximumSeats: 50, // seats NOT the limiter here
+    });
+    // A single-use code raced by 6 distinct devices: exactly one may win.
+    const { activationCode, record } = await container.service.generateActivationCode(license.id, 1);
+    const results = await Promise.allSettled(
+      Array.from({ length: 6 }, (_, i) =>
+        container.service.activate({ activationCode, deviceId: `race-dev-${i}` }),
+      ),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+
+    const row = await container.pool!.query(
+      "SELECT used_activations, max_activations, status FROM activation_codes WHERE id=$1",
+      [record.id],
+    );
+    expect(Number(row.rows[0]!.used_activations)).toBe(1); // never exceeds max
+    expect(row.rows[0]!.status).toBe("consumed");
+  });
 });
