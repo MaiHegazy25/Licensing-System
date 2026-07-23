@@ -7,6 +7,8 @@ export type DomainErrorCode =
   | "SEAT_LIMIT_REACHED"
   | "LICENSE_NOT_ACTIVE"
   | "LEASE_NOT_FOUND"
+  | "TRIAL_NOT_AVAILABLE"
+  | "TRIAL_ALREADY_USED"
   | "VALIDATION";
 
 export class DomainError extends Error {

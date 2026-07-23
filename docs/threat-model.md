@@ -34,6 +34,7 @@ brief. Each threat lists the mitigation and its **current status**.
 | T10 | **Signing-key compromise** | Keys only in KMS/HSM; `kid` rotation; revoke compromised kid, re-issue; clients trust current+next | ✅ design + rotation mechanics; ⏳ KMS provider |
 | T11 | **Replay** (reuse activation/validate) | tokenId (jti), single-use codes, idempotent re-activation by device, nonce/rate limits _(planned)_ | ✅ partial; ⏳ nonce |
 | T12 | **Downgrade / short network blip blocks user** | Offline fallback within window; never hard-exit on transient network error | ✅ implemented + tested |
+| T13 | **Trial farming** (repeated free trials) | One trial per (product, device) enforced by a DB unique constraint (race-proof); trial tokens device-bound; rate limiting on /trial/start. HONEST LIMIT: the guard keys on the client-derived device id — wiping/forging it defeats the guard; this raises cost, it cannot fully prevent | ✅ baseline |
 
 ## Residual risk (acknowledged)
 - A fully attacker-controlled device can patch the SDK. We raise cost and make

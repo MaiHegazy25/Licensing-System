@@ -171,6 +171,41 @@ export class LicensingClient {
   }
 
   /**
+   * startTrial(productKey) — begin (or resume) a free self-service trial for a
+   * product on this device. No activation code needed. The server enforces one
+   * trial per (product, device) and returns a device-bound token; repeat calls
+   * during the trial resume the remaining days, and a finished trial throws
+   * TrialAlreadyUsed.
+   */
+  async startTrial(productKey: string): Promise<LicenseSnapshot> {
+    let res;
+    try {
+      res = await this.cfg.http.post("/api/v1/trial/start", {
+        productKey,
+        deviceId: this.cfg.deviceId,
+        deviceLabel: this.cfg.deviceLabel ?? null,
+      });
+    } catch {
+      throw new LicensingError(LicensingErrorCode.Network);
+    }
+    if (res.status === 409) throw new LicensingError(LicensingErrorCode.TrialAlreadyUsed);
+    if (res.status !== 200) {
+      throw new LicensingError(LicensingErrorCode.TrialNotAvailable, `server ${res.status}`);
+    }
+    const body = res.body as { token: string; licenseId: string };
+    const claims = this.verifyOrThrow(body.token);
+    const state: StoredState = {
+      licenseId: body.licenseId,
+      deviceId: this.cfg.deviceId,
+      token: body.token,
+      lastServerTime: claims.issuedAt,
+    };
+    await this.cfg.store.save(state);
+    this.last = this.snapshotFromToken(body.token, "online")!;
+    return this.last;
+  }
+
+  /**
    * deactivate() — releases this device's seat on the server (best-effort,
    * authenticated by presenting the stored signed token as proof of
    * possession), returns any held floating seat, then clears local state.

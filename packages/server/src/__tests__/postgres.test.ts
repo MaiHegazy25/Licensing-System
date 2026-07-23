@@ -205,4 +205,29 @@ d("Postgres persistence", () => {
     expect(Number(row.rows[0]!.used_activations)).toBe(1); // never exceeds max
     expect(row.rows[0]!.status).toBe("consumed");
   });
+
+  it("grants exactly one trial per device under concurrent requests (unique constraint)", async () => {
+    await container.service.createProduct({
+      key: "vv-trial-pg",
+      name: "Trial PG",
+      trial: { enabled: true, days: 7, features: ["basic"] },
+    });
+    // The same device races 5 concurrent trial starts.
+    const results = await Promise.allSettled(
+      Array.from({ length: 5 }, () =>
+        container.service.startTrial({ productKey: "vv-trial-pg", deviceId: "pg-trial-dev" }),
+      ),
+    );
+    const ok = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{
+      license: { id: string };
+    }>[];
+    expect(ok.length).toBe(5); // all succeed (winner creates, losers resume)
+    const licenseIds = new Set(ok.map((r) => r.value.license.id));
+    expect(licenseIds.size).toBe(1); // ...but they all share ONE license
+
+    const rows = await container.pool!.query<{ n: string }>(
+      "SELECT count(*)::int AS n FROM trials WHERE device_id='pg-trial-dev'",
+    );
+    expect(Number(rows.rows[0]!.n)).toBe(1); // exactly one trial row
+  });
 });

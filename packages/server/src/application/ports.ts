@@ -9,6 +9,7 @@ import type {
   OfflineResponseRecord,
   Product,
   Revocation,
+  TrialRecord,
 } from "../domain/types.js";
 
 export interface Clock {
@@ -119,6 +120,16 @@ export interface FloatingLeaseRepository {
   release(leaseId: string, deviceId: string, now: number): Promise<boolean>;
   countActive(licenseId: string, now: number): Promise<number>;
   listActive(licenseId: string, now: number): Promise<FloatingLease[]>;
+}
+
+export interface TrialRepository {
+  /**
+   * Atomically claim the one-trial-per-(product, device) slot. Returns false if
+   * a trial already exists for this pair — race-proof via the DB unique
+   * constraint in Postgres.
+   */
+  create(t: TrialRecord): Promise<boolean>;
+  findByProductAndDevice(productId: string, deviceId: string): Promise<TrialRecord | null>;
 }
 
 export interface OfflineRepository {

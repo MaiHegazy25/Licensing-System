@@ -14,6 +14,7 @@ import type {
   OfflineResponseRecord,
   Product,
   Revocation,
+  TrialRecord,
 } from "../../domain/types.js";
 import type {
   AcquireLeaseParams,
@@ -29,6 +30,7 @@ import type {
   RevocationRepository,
   SecurityEvent,
   SecurityEventRepository,
+  TrialRepository,
 } from "../../application/ports.js";
 
 const clone = <T>(v: T): T => structuredClone(v);
@@ -251,6 +253,21 @@ export class InMemoryFloatingLeaseRepository implements FloatingLeaseRepository 
       .filter((l) => l.licenseId === licenseId && this.isActive(l, now))
       .sort((a, b) => a.acquiredAt - b.acquiredAt)
       .map(clone);
+  }
+}
+
+export class InMemoryTrialRepository implements TrialRepository {
+  private byKey = new Map<string, TrialRecord>();
+  async create(t: TrialRecord): Promise<boolean> {
+    // Single-threaded event loop: check-then-set is atomic here.
+    const key = `${t.productId}:${t.deviceId}`;
+    if (this.byKey.has(key)) return false;
+    this.byKey.set(key, clone(t));
+    return true;
+  }
+  async findByProductAndDevice(productId: string, deviceId: string): Promise<TrialRecord | null> {
+    const t = this.byKey.get(`${productId}:${deviceId}`);
+    return t ? clone(t) : null;
   }
 }
 

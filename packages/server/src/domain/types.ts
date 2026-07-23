@@ -1,9 +1,34 @@
 import type { LicenseType } from "@vehiclevo/licensing-shared";
 
+/** Per-product self-service trial policy. */
+export interface TrialPolicy {
+  enabled: boolean;
+  days: number;
+  edition: string;
+  features: string[];
+}
+
+export const DEFAULT_TRIAL_POLICY: TrialPolicy = {
+  enabled: false,
+  days: 14,
+  edition: "trial",
+  features: [],
+};
+
 export interface Product {
   id: string;
   key: string; // stable human code, e.g. "vv-analyzer"
   name: string;
+  createdAt: number;
+  trial: TrialPolicy;
+}
+
+/** One row per (product, device) trial grant — the one-trial-per-device guard. */
+export interface TrialRecord {
+  id: string;
+  productId: string;
+  licenseId: string;
+  deviceId: string;
   createdAt: number;
 }
 
@@ -29,7 +54,8 @@ export interface ActivationCodeRecord {
 export interface Activation {
   id: string;
   licenseId: string;
-  activationCodeId: string;
+  /** null for trial activations (issued without an activation code). */
+  activationCodeId: string | null;
   deviceId: string; // salted, derived — NOT a raw MAC/serial
   deviceLabel: string | null;
   status: "active" | "deactivated";
@@ -91,7 +117,8 @@ export type AuditEventType =
   | "license_file.downloaded"
   | "floating.checkout"
   | "floating.return"
-  | "offline.issued";
+  | "offline.issued"
+  | "trial.started";
 
 export interface AuditEvent {
   id: string;

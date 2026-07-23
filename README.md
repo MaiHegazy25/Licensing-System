@@ -197,6 +197,24 @@ try {
 }
 ```
 
+### Self-service trial
+```ts
+try {
+  const snap = await licensing.startTrial("vv-analyzer");  // no code needed
+  console.log("trial started:", snap.features);
+} catch (e) {
+  const err = e as LicensingError;
+  if (err.code === LicensingErrorCode.TrialAlreadyUsed) showBuyDialog();
+  else if (err.code === LicensingErrorCode.TrialNotAvailable) hideTrialButton();
+}
+```
+Trials are configured per product in the admin portal (enabled, days,
+features). The server enforces **one trial per device per product** (DB unique
+constraint, race-proof) and issues a **device-bound** token. Repeat calls while
+the trial runs resume its remaining days; after it ends they throw
+`TrialAlreadyUsed`. Honest limit: the guard keys on the derived device id, which
+raises the cost of trial farming but cannot fully prevent it.
+
 ### Offline (air-gapped) activation
 ```ts
 // 1) On the air-gapped machine — no network needed:

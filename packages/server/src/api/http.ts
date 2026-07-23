@@ -24,6 +24,8 @@ const HTTP_FOR_CODE: Record<DomainErrorCode, number> = {
   SEAT_LIMIT_REACHED: 409,
   LICENSE_NOT_ACTIVE: 403,
   LEASE_NOT_FOUND: 409,
+  TRIAL_NOT_AVAILABLE: 403,
+  TRIAL_ALREADY_USED: 409,
   VALIDATION: 400,
 };
 
@@ -287,6 +289,23 @@ export function buildHttpServer(container: Container): FastifyInstance {
     const result = await container.service.validate(body);
     const code = result.status === "valid" ? 200 : 403;
     return reply.code(code).send(result);
+  });
+
+  // --- Client: self-service trial ---
+  app.post("/api/v1/trial/start", async (req, reply) => {
+    enforceRateLimit(req, "trial");
+    const body = req.body as { productKey: string; deviceId: string; deviceLabel?: string };
+    const { token, license } = await container.service.startTrial({
+      productKey: body.productKey,
+      deviceId: body.deviceId,
+      deviceLabel: body.deviceLabel ?? null,
+    });
+    return reply.send({
+      token,
+      licenseId: license.id,
+      status: license.status,
+      expiresAt: license.expiresAt,
+    });
   });
 
   // --- Client: deactivation (SDK-initiated seat release) ---

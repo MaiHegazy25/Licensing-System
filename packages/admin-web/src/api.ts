@@ -8,11 +8,19 @@ export type LicenseStatus = "draft" | "active" | "suspended" | "expired" | "revo
 export type LicenseType =
   | "named_user" | "device" | "floating" | "subscription" | "perpetual" | "trial";
 
+export interface TrialPolicy {
+  enabled: boolean;
+  days: number;
+  edition: string;
+  features: string[];
+}
+
 export interface Product {
   id: string;
   key: string;
   name: string;
   createdAt: number;
+  trial: TrialPolicy;
 }
 
 export interface License {
@@ -171,7 +179,7 @@ export class AdminApi {
   listProducts(): Promise<{ items: Product[] }> {
     return this.request("GET", "/api/v1/admin/products");
   }
-  createProduct(input: { key: string; name: string }): Promise<Product> {
+  createProduct(input: { key: string; name: string; trial?: Partial<TrialPolicy> }): Promise<Product> {
     return this.request("POST", "/api/v1/admin/products", input);
   }
 

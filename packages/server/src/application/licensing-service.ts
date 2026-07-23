@@ -16,14 +16,17 @@ import {
   type License,
   type LicenseStatus,
 } from "../domain/license.js";
-import type {
-  Activation,
-  ActivationCodeRecord,
-  AuditEvent,
-  FloatingLease,
-  Product,
-  Revocation,
-  LicenseType,
+import {
+  DEFAULT_TRIAL_POLICY,
+  type Activation,
+  type ActivationCodeRecord,
+  type AuditEvent,
+  type FloatingLease,
+  type Product,
+  type Revocation,
+  type LicenseType,
+  type TrialPolicy,
+  type TrialRecord,
 } from "../domain/types.js";
 import type {
   ActivationCodeRepository,
@@ -38,6 +41,7 @@ import type {
   OfflineRepository,
   ProductRepository,
   RevocationRepository,
+  TrialRepository,
 } from "./ports.js";
 import type { TokenIssuer } from "./token-issuer.js";
 
@@ -51,6 +55,7 @@ export interface LicensingServiceDeps {
   activations: ActivationRepository;
   floatingLeases: FloatingLeaseRepository;
   offline: OfflineRepository;
+  trials: TrialRepository;
   revocations: RevocationRepository;
   audit: AuditRepository;
   tokenIssuer: TokenIssuer;
@@ -102,16 +107,24 @@ export interface ValidationResult {
 export class LicensingService {
   constructor(private readonly d: LicensingServiceDeps) {}
 
-  async createProduct(input: { key: string; name: string }, actor = "admin"): Promise<Product> {
+  async createProduct(
+    input: { key: string; name: string; trial?: Partial<TrialPolicy> },
+    actor = "admin",
+  ): Promise<Product> {
     const existing = await this.d.products.getByKey(input.key);
     if (existing) {
       throw new DomainError("VALIDATION", `product key '${input.key}' already exists`);
+    }
+    const trial: TrialPolicy = { ...DEFAULT_TRIAL_POLICY, ...input.trial };
+    if (trial.enabled && (!Number.isInteger(trial.days) || trial.days < 1 || trial.days > 365)) {
+      throw new DomainError("VALIDATION", "trial.days must be an integer between 1 and 365");
     }
     const product: Product = {
       id: this.d.ids.next("prod"),
       key: input.key,
       name: input.name,
       createdAt: this.d.clock.now(),
+      trial,
     };
     await this.d.products.create(product);
     await this.d.audit.append({
@@ -524,6 +537,124 @@ export class LicensingService {
       at: now,
       metadata: { activationId: activation.id, self_service: true },
     });
+  }
+
+  // --- self-service trials ---
+
+  /**
+   * Start (or resume) a free trial for a product on a device. One trial per
+   * (product, device), enforced atomically by the trial registry's unique
+   * constraint. While the trial is still running, repeat calls resume it
+   * (reinstall keeps the remaining days); after it ends, TRIAL_ALREADY_USED.
+   * The issued token is device-bound so the trial license cannot be copied.
+   */
+  async startTrial(input: {
+    productKey: string;
+    deviceId: string;
+    deviceLabel?: string | null;
+  }): Promise<{ token: string; license: License }> {
+    const product = await this.d.products.getByKey(input.productKey);
+    if (!product || !product.trial.enabled) {
+      throw new DomainError("TRIAL_NOT_AVAILABLE", "no trial is available for this product");
+    }
+    const existing = await this.d.trials.findByProductAndDevice(product.id, input.deviceId);
+    if (existing) return this.resumeTrial(existing.licenseId, input.deviceId);
+
+    const now = this.d.clock.now();
+    const license: License = {
+      id: this.d.ids.next("lic"),
+      customerId: `trial:${input.deviceId}`,
+      organizationId: null,
+      productId: product.id,
+      edition: product.trial.edition,
+      enabledFeatures: product.trial.features,
+      licenseType: "trial",
+      status: "active",
+      maximumSeats: 1,
+      notBefore: now,
+      expiresAt: now + product.trial.days * 86400,
+      maintenanceExpiresAt: null,
+      gracePeriodSeconds: 0,
+      offlineUntil: null,
+      createdAt: now,
+      updatedAt: now,
+      version: 1,
+    };
+    await this.d.licenses.create(license);
+
+    const record: TrialRecord = {
+      id: this.d.ids.next("trial"),
+      productId: product.id,
+      licenseId: license.id,
+      deviceId: input.deviceId,
+      createdAt: now,
+    };
+    const claimed = await this.d.trials.create(record);
+    if (!claimed) {
+      // Lost a race with a concurrent request from the same device: retire the
+      // orphan license we just created and resume the winner's trial instead.
+      const prevVersion = license.version;
+      license.status = "revoked";
+      license.updatedAt = now;
+      license.version += 1;
+      await this.d.licenses.update(license, prevVersion);
+      const winner = await this.d.trials.findByProductAndDevice(product.id, input.deviceId);
+      if (!winner) throw new DomainError("TRIAL_NOT_AVAILABLE", "trial state conflict");
+      return this.resumeTrial(winner.licenseId, input.deviceId);
+    }
+
+    // Register the device so /validate works for the trial (single seat).
+    await this.d.activations.createIfUnderSeatLimit(
+      {
+        id: this.d.ids.next("act"),
+        licenseId: license.id,
+        activationCodeId: null,
+        deviceId: input.deviceId,
+        deviceLabel: input.deviceLabel ?? null,
+        status: "active",
+        activatedAt: now,
+        lastSeenAt: now,
+        deactivatedAt: null,
+      },
+      1,
+    );
+    await this.d.audit.append({
+      id: this.d.ids.next("evt"),
+      type: "trial.started",
+      licenseId: license.id,
+      actor: `sdk:${input.deviceId}`,
+      at: now,
+      metadata: { productKey: product.key, days: product.trial.days },
+    });
+
+    const issued = await this.d.tokenIssuer.issue(license, {
+      deviceBinding: hashDeviceBinding(input.deviceId),
+    });
+    return { token: issued.token, license };
+  }
+
+  /** Resume a still-running trial; deny once it has ended in any way. */
+  private async resumeTrial(
+    licenseId: string,
+    deviceId: string,
+  ): Promise<{ token: string; license: License }> {
+    const license = await this.d.licenses.get(licenseId);
+    if (!license) throw new DomainError("NOT_FOUND", "trial license not found");
+    const now = this.d.clock.now();
+    const ended =
+      license.status !== "active" ||
+      (await this.d.revocations.isRevoked(license.id)) ||
+      (license.expiresAt !== null && now > license.expiresAt + license.gracePeriodSeconds);
+    if (ended) {
+      throw new DomainError(
+        "TRIAL_ALREADY_USED",
+        "the trial for this product has already been used on this device",
+      );
+    }
+    const issued = await this.d.tokenIssuer.issue(license, {
+      deviceBinding: hashDeviceBinding(deviceId),
+    });
+    return { token: issued.token, license };
   }
 
   // --- offline activation (air-gapped: signed request/response files) ---
