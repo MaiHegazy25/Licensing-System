@@ -88,7 +88,13 @@ export interface ValidateInput {
 }
 
 export interface ValidationResult {
-  status: "valid" | "revoked" | "suspended" | "expired" | "not_active";
+  status:
+    | "valid"
+    | "revoked"
+    | "suspended"
+    | "expired"
+    | "not_active"
+    | "device_not_activated";
   token?: string;
   licenseStatus: LicenseStatus;
 }
@@ -208,10 +214,13 @@ export class LicensingService {
       input.deviceId,
     );
     if (!existing) {
-      if (code.usedActivations >= code.maxActivations) {
+      const now = this.d.clock.now();
+      // Atomically consume one code use FIRST (conditional update — race-free),
+      // so concurrent activations can never exceed maxActivations.
+      const consumed = await this.d.activationCodes.consumeUse(code.id, now);
+      if (!consumed) {
         throw new DomainError("ACTIVATION_CODE_CONSUMED", "activation code exhausted");
       }
-      const now = this.d.clock.now();
       const activation: Activation = {
         id: this.d.ids.next("act"),
         licenseId: license.id,
@@ -230,14 +239,10 @@ export class LicensingService {
         license.maximumSeats,
       );
       if (!created) {
+        // Give the consumed code use back — the activation did not happen.
+        await this.d.activationCodes.releaseUse(code.id);
         throw new DomainError("SEAT_LIMIT_REACHED", "maximum seats reached");
       }
-      code.usedActivations += 1;
-      if (code.usedActivations >= code.maxActivations) {
-        code.status = "consumed";
-        code.consumedAt = now;
-      }
-      await this.d.activationCodes.update(code);
       await this.d.audit.append({
         id: this.d.ids.next("evt"),
         type: "license.activated",
@@ -272,12 +277,15 @@ export class LicensingService {
       return { status: "expired", licenseStatus: "expired" };
     }
 
-    // Touch last-seen for the device (best-effort presence tracking).
+    // The device must hold an ACTIVE activation. Without this check a device
+    // that was deactivated (freeing its seat) — or that never activated at
+    // all — would keep receiving fresh signed tokens forever.
     const act = await this.d.activations.findActiveByDevice(license.id, input.deviceId);
-    if (act) {
-      act.lastSeenAt = now;
-      await this.d.activations.update(act);
+    if (!act) {
+      return { status: "device_not_activated", licenseStatus: license.status };
     }
+    act.lastSeenAt = now;
+    await this.d.activations.update(act);
 
     const issued = await this.d.tokenIssuer.issue(license);
     await this.d.audit.append({
@@ -286,7 +294,7 @@ export class LicensingService {
       licenseId: license.id,
       actor: `sdk:${input.deviceId}`,
       at: now,
-      metadata: { deviceKnown: Boolean(act) },
+      metadata: {},
     });
     return { status: "valid", token: issued.token, licenseStatus: "active" };
   }
@@ -495,6 +503,29 @@ export class LicensingService {
     return { token: issued.token, licenseId };
   }
 
+  /**
+   * SDK-initiated deactivation. The HTTP layer authenticates the caller by
+   * verifying it presents a validly signed license token (proof of possession)
+   * for this licenseId. Idempotent: deactivating an unknown/inactive device is
+   * a no-op.
+   */
+  async deactivateFromClient(licenseId: string, deviceId: string): Promise<void> {
+    const activation = await this.d.activations.findActiveByDevice(licenseId, deviceId);
+    if (!activation) return;
+    const now = this.d.clock.now();
+    activation.status = "deactivated";
+    activation.deactivatedAt = now;
+    await this.d.activations.update(activation);
+    await this.d.audit.append({
+      id: this.d.ids.next("evt"),
+      type: "device.deactivated",
+      licenseId,
+      actor: `sdk:${deviceId}`,
+      at: now,
+      metadata: { activationId: activation.id, self_service: true },
+    });
+  }
+
   // --- offline activation (air-gapped: signed request/response files) ---
 
   /**
@@ -534,7 +565,10 @@ export class LicensingService {
     // Register the device (consume a seat) unless it is already active.
     const existing = await this.d.activations.findActiveByDevice(license.id, request.deviceId);
     if (!existing) {
-      if (code.usedActivations >= code.maxActivations) {
+      // Atomic code consumption first, compensated if the seat insert fails —
+      // same race-free pattern as online activate().
+      const consumed = await this.d.activationCodes.consumeUse(code.id, now);
+      if (!consumed) {
         throw new DomainError("ACTIVATION_CODE_CONSUMED", "activation code exhausted");
       }
       const activation: Activation = {
@@ -552,13 +586,10 @@ export class LicensingService {
         activation,
         license.maximumSeats,
       );
-      if (!created) throw new DomainError("SEAT_LIMIT_REACHED", "maximum seats reached");
-      code.usedActivations += 1;
-      if (code.usedActivations >= code.maxActivations) {
-        code.status = "consumed";
-        code.consumedAt = now;
+      if (!created) {
+        await this.d.activationCodes.releaseUse(code.id);
+        throw new DomainError("SEAT_LIMIT_REACHED", "maximum seats reached");
       }
-      await this.d.activationCodes.update(code);
     }
 
     // Long-lived, device-bound token so the air-gapped client can run offline

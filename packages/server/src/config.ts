@@ -59,5 +59,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (cfg.activationCodePepper.length < 16) {
     throw new ConfigError("ACTIVATION_CODE_PEPPER must be >= 16 chars");
   }
+  // Production hardening: a wildcard CORS origin for the admin/customer SPAs is
+  // acceptable only in development — fail fast rather than boot open.
+  if (appEnv === "production") {
+    const origin = env.ADMIN_WEB_ORIGIN;
+    if (!origin || origin === "*") {
+      throw new ConfigError(
+        "ADMIN_WEB_ORIGIN must be set to an explicit origin (not '*') in production",
+      );
+    }
+  }
   return cfg;
 }

@@ -7,9 +7,12 @@
  * PRODUCTION swaps in an OIDC-token resolver behind the same port — routes and
  * the permission matrix are unchanged.
  */
+import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { hashDeviceBinding, verifyLicenseToken } from "@vehiclevo/licensing-shared";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { permissionsForRole, roleHasPermission, type Permission } from "../domain/rbac.js";
+import { FixedWindowRateLimiter } from "../infrastructure/rate-limiter.js";
 import type { Principal, CustomerPrincipal } from "../application/auth.js";
 import type { Container } from "../container.js";
 
@@ -59,6 +62,33 @@ export function buildHttpServer(container: Container): FastifyInstance {
     },
   );
 
+  // Rate limiting for public (unauthenticated) endpoints — baseline protection
+  // against activation-code brute force and endpoint abuse. Per-instance; see
+  // rate-limiter.ts for the honest limitation note.
+  const rateLimiter = new FixedWindowRateLimiter(
+    Number(process.env.RATE_LIMIT_MAX ?? 120),
+    Number(process.env.RATE_LIMIT_WINDOW_SECONDS ?? 60),
+    container.clock,
+  );
+
+  const recordSecurityEvent = (
+    type: string,
+    subject: string | null,
+    metadata: Record<string, string | number | boolean | null> = {},
+  ): void => {
+    // Fire-and-forget: security telemetry must never fail a request.
+    void container.securityEvents
+      .record({ id: `sec_${randomUUID()}`, type, subject, at: container.clock.now(), metadata })
+      .catch(() => {});
+  };
+
+  const enforceRateLimit = (req: FastifyRequest, group: string): void => {
+    if (!rateLimiter.check(`${req.ip}:${group}`)) {
+      recordSecurityEvent("rate_limit_exceeded", req.ip, { group });
+      throw httpError(429, "too many requests");
+    }
+  };
+
   // Authenticate a request to a Principal (401 if unknown / unconfigured).
   const authenticate = async (req: FastifyRequest): Promise<Principal> => {
     if (!container.principals.isConfigured()) {
@@ -68,7 +98,10 @@ export function buildHttpServer(container: Container): FastifyInstance {
       );
     }
     const principal = await container.principals.resolve(bearer(req));
-    if (!principal) throw httpError(401, "unauthorized");
+    if (!principal) {
+      recordSecurityEvent("auth_failed", req.ip, { surface: "admin" });
+      throw httpError(401, "unauthorized");
+    }
     return principal;
   };
 
@@ -104,7 +137,13 @@ export function buildHttpServer(container: Container): FastifyInstance {
     const message =
       status === 500 ? "internal error" : (err as { message?: string }).message ?? "error";
     const code =
-      status === 401 ? "UNAUTHORIZED" : status === 403 ? "FORBIDDEN" : "INTERNAL";
+      status === 401
+        ? "UNAUTHORIZED"
+        : status === 403
+          ? "FORBIDDEN"
+          : status === 429
+            ? "RATE_LIMITED"
+            : "INTERNAL";
     return reply.code(status).send({ error: { code, message } });
   });
 
@@ -112,10 +151,17 @@ export function buildHttpServer(container: Container): FastifyInstance {
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/ready", async () => ({ status: "ready", keys: container.keyProvider.trustedKeyIds() }));
 
-  // --- Public key distribution (SDK trust-store bootstrap; public keys only) ---
+  // --- Public key distribution (SDK trust-store bootstrap; PUBLIC keys only) ---
   app.get("/api/v1/keys", async () => {
-    // In production serve PEMs of trusted public keys keyed by kid.
-    return { activeKeyId: container.keyProvider.trustedKeyIds()[0], trustedKeyIds: container.keyProvider.trustedKeyIds() };
+    const store = container.keyProvider.publicKeyStore();
+    const kids = container.keyProvider.trustedKeyIds();
+    return {
+      activeKeyId: kids[0],
+      keys: kids.map((kid) => ({
+        kid,
+        publicKeyPem: store.get(kid)?.export({ type: "spki", format: "pem" }).toString() ?? null,
+      })),
+    };
   });
 
   // --- Admin: identity (who am I + what can I do) ---
@@ -224,6 +270,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
 
   // --- Client: activation ---
   app.post("/api/v1/activate", async (req, reply) => {
+    enforceRateLimit(req, "activate");
     const body = req.body as { activationCode: string; deviceId: string; deviceLabel?: string };
     const { token, license } = await container.service.activate({
       activationCode: body.activationCode,
@@ -235,16 +282,54 @@ export function buildHttpServer(container: Container): FastifyInstance {
 
   // --- Client: online validation ---
   app.post("/api/v1/validate", async (req, reply) => {
+    enforceRateLimit(req, "validate");
     const body = req.body as { licenseId: string; deviceId: string };
     const result = await container.service.validate(body);
     const code = result.status === "valid" ? 200 : 403;
     return reply.code(code).send(result);
   });
 
+  // --- Client: deactivation (SDK-initiated seat release) ---
+  // Authenticated by proof-of-possession: the caller must present a validly
+  // SIGNED license token for the license it wants to deactivate a device on.
+  app.post("/api/v1/deactivate", async (req, reply) => {
+    enforceRateLimit(req, "deactivate");
+    const body = req.body as { token?: string; deviceId?: string };
+    if (!body?.token || !body?.deviceId) {
+      throw new DomainError("VALIDATION", "token and deviceId are required");
+    }
+    const r = verifyLicenseToken(body.token, container.keyProvider.publicKeyStore(), {
+      expectedAudience: container.config.tokenAudience,
+      expectedIssuer: container.config.tokenIssuer,
+      clock: container.clock,
+    });
+    // Accept any token whose SIGNATURE and iss/aud verify — an expired token is
+    // still valid proof of possession for releasing a seat.
+    const signatureValid =
+      r.claims !== undefined &&
+      !["bad_signature", "unknown_key", "malformed", "wrong_audience", "wrong_issuer"].includes(
+        r.status,
+      );
+    if (!signatureValid) {
+      recordSecurityEvent("auth_failed", req.ip, { surface: "deactivate" });
+      throw httpError(401, "invalid license token");
+    }
+    const claims = r.claims!;
+    if (
+      claims.deviceBinding !== null &&
+      claims.deviceBinding !== hashDeviceBinding(body.deviceId)
+    ) {
+      throw httpError(403, "token is not bound to this device");
+    }
+    await container.service.deactivateFromClient(claims.licenseId, body.deviceId);
+    return reply.code(204).send();
+  });
+
   // --- Client: offline activation (air-gapped) ---
   // Accepts a signed-request file, returns a signed-response file. Public like
   // /activate — the activation code in the request is the credential.
   app.post("/api/v1/offline/response", async (req, reply) => {
+    enforceRateLimit(req, "offline");
     const response = await container.service.generateOfflineResponse(req.body as never);
     return reply
       .header("content-disposition", `attachment; filename="offline-response-${response.requestId}.json"`)
@@ -253,6 +338,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
 
   // --- Client: floating (concurrent) seats ---
   app.post("/api/v1/floating/checkout", async (req, reply) => {
+    enforceRateLimit(req, "floating");
     const body = req.body as { licenseId: string; deviceId: string; deviceLabel?: string };
     const result = await container.service.checkoutSeat({
       licenseId: body.licenseId,
@@ -263,11 +349,13 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   app.post("/api/v1/floating/heartbeat", async (req, reply) => {
+    enforceRateLimit(req, "floating");
     const body = req.body as { leaseId: string; deviceId: string };
     return reply.send(await container.service.heartbeatSeat(body));
   });
 
   app.post("/api/v1/floating/return", async (req, reply) => {
+    enforceRateLimit(req, "floating");
     const body = req.body as { leaseId: string; deviceId: string };
     await container.service.returnSeat(body);
     return reply.code(204).send();
@@ -279,7 +367,10 @@ export function buildHttpServer(container: Container): FastifyInstance {
       throw new DomainError("VALIDATION", "customer auth not configured (set CUSTOMER_API_KEYS)");
     }
     const principal = await container.customerPrincipals.resolve(bearer(req));
-    if (!principal) throw httpError(401, "unauthorized");
+    if (!principal) {
+      recordSecurityEvent("auth_failed", req.ip, { surface: "customer" });
+      throw httpError(401, "unauthorized");
+    }
     return principal;
   };
 

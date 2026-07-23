@@ -58,6 +58,14 @@ export interface ActivationCodeRepository {
   findByHash(hash: string): Promise<ActivationCodeRecord | null>;
   update(r: ActivationCodeRecord): Promise<void>;
   listByLicense(licenseId: string): Promise<ActivationCodeRecord[]>;
+  /**
+   * Atomically consume one use of the code. Returns false if the code is
+   * revoked or already at maxActivations. MUST be race-free under concurrency
+   * (conditional UPDATE in Postgres) so a code can never be over-consumed.
+   */
+  consumeUse(id: string, now: number): Promise<boolean>;
+  /** Compensating action when a consume was granted but the activation failed. */
+  releaseUse(id: string): Promise<void>;
 }
 
 export interface ActivationRepository {
@@ -128,4 +136,18 @@ export interface AuditQuery {
 export interface AuditRepository {
   append(e: AuditEvent): Promise<void>;
   query(query: AuditQuery): Promise<AuditEvent[]>;
+}
+
+/** Security telemetry (rate-limit hits, failed auth, replay attempts, ...). */
+export interface SecurityEvent {
+  id: string;
+  type: string; // e.g. "rate_limit_exceeded" | "auth_failed"
+  /** Who/where it came from (IP, device id) — never a secret. */
+  subject: string | null;
+  at: number;
+  metadata: Record<string, string | number | boolean | null>;
+}
+
+export interface SecurityEventRepository {
+  record(e: SecurityEvent): Promise<void>;
 }

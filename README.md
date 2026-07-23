@@ -217,7 +217,9 @@ different device is rejected (`DeviceMismatch`).
 
 ### Logout / deactivate & graceful shutdown
 ```ts
-await licensing.deactivate();          // clears local activation
+await licensing.deactivate();          // releases the seat server-side
+                                       // (proof-of-possession), returns any
+                                       // floating seat, then clears local state
 // on shutdown just stop the validation timer; the signed cache persists
 ```
 
