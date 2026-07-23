@@ -19,6 +19,8 @@ export enum LicensingErrorCode {
   NoActiveLease = "NO_ACTIVE_LEASE",
   DeviceMismatch = "DEVICE_MISMATCH",
   OfflineFileInvalid = "OFFLINE_FILE_INVALID",
+  TrialNotAvailable = "TRIAL_NOT_AVAILABLE",
+  TrialAlreadyUsed = "TRIAL_ALREADY_USED",
 }
 
 /** Human-friendly messages — safe to surface to end users. */
@@ -42,6 +44,8 @@ const MESSAGES: Record<LicensingErrorCode, string> = {
   [LicensingErrorCode.NoActiveLease]: "No concurrent seat is currently checked out.",
   [LicensingErrorCode.DeviceMismatch]: "This license file was issued for a different device.",
   [LicensingErrorCode.OfflineFileInvalid]: "The offline activation file is invalid or corrupted.",
+  [LicensingErrorCode.TrialNotAvailable]: "A free trial is not available for this product.",
+  [LicensingErrorCode.TrialAlreadyUsed]: "The free trial has already been used on this device.",
 };
 
 export class LicensingError extends Error {

@@ -22,6 +22,7 @@ import {
   InMemoryLicenseRepository,
   InMemoryOfflineRepository,
   InMemoryProductRepository,
+  InMemoryTrialRepository,
   InMemoryRevocationRepository,
   InMemorySecurityEventRepository,
 } from "./infrastructure/persistence/memory.js";
@@ -35,6 +36,7 @@ import {
   PgProductRepository,
   PgRevocationRepository,
   PgSecurityEventRepository,
+  PgTrialRepository,
 } from "./infrastructure/persistence/postgres.js";
 import { createPool, type Pool } from "./infrastructure/persistence/pool.js";
 import type {
@@ -48,6 +50,7 @@ import type {
   ProductRepository,
   RevocationRepository,
   SecurityEventRepository,
+  TrialRepository,
 } from "./application/ports.js";
 import { buildPrincipalResolver } from "./infrastructure/auth/resolver-factory.js";
 import { CustomerApiKeyResolver } from "./infrastructure/auth/customer-api-key-resolver.js";
@@ -76,6 +79,7 @@ interface RepoSet {
   activations: ActivationRepository;
   floatingLeases: FloatingLeaseRepository;
   offline: OfflineRepository;
+  trials: TrialRepository;
   revocations: RevocationRepository;
   audit: AuditRepository;
   securityEvents: SecurityEventRepository;
@@ -92,6 +96,7 @@ function buildRepos(cfg: AppConfig): RepoSet {
       activations: new PgActivationRepository(pool),
       floatingLeases: new PgFloatingLeaseRepository(pool),
       offline: new PgOfflineRepository(pool),
+      trials: new PgTrialRepository(pool),
       revocations: new PgRevocationRepository(pool),
       audit: new PgAuditRepository(pool),
       securityEvents: new PgSecurityEventRepository(pool),
@@ -105,6 +110,7 @@ function buildRepos(cfg: AppConfig): RepoSet {
     activations: new InMemoryActivationRepository(),
     floatingLeases: new InMemoryFloatingLeaseRepository(),
     offline: new InMemoryOfflineRepository(),
+    trials: new InMemoryTrialRepository(),
     revocations: new InMemoryRevocationRepository(),
     audit: new InMemoryAuditRepository(),
     securityEvents: new InMemorySecurityEventRepository(),
@@ -149,6 +155,7 @@ export function buildContainer(
     activations: repos.activations,
     floatingLeases: repos.floatingLeases,
     offline: repos.offline,
+    trials: repos.trials,
     revocations: repos.revocations,
     audit: repos.audit,
     tokenIssuer,

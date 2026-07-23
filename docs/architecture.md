@@ -142,5 +142,6 @@ endpoints exist today (`/health`, `/ready`).
 | Offline activation (signed request/response files, device-bound, air-gapped) | ✅ implemented + tested; idempotent/replay-safe; SDK generate/import |
 | Rate limiting + security-event logging (per-IP fixed window, 429, security_events table) | ✅ baseline (per-instance; shared-store limiter ⏳) |
 | SDK-initiated deactivation (proof-of-possession token, frees the seat) | ✅ implemented + tested |
-| Trials, usage reporting/monitoring | ⏳ planned |
+| Trial licenses (self-service start, per-product policy, one-per-device guard, device-bound tokens) | ✅ implemented + tested (incl. Postgres uniqueness race) |
+| Usage reporting/monitoring | ⏳ planned |
 | Reporting, key rotation runbook, monitoring | ⏳ planned (P6) |

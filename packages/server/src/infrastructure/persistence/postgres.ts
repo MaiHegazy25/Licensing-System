@@ -18,6 +18,7 @@ import type {
   OfflineResponseRecord,
   Product,
   Revocation,
+  TrialRecord,
 } from "../../domain/types.js";
 import type {
   AcquireLeaseParams,
@@ -33,6 +34,7 @@ import type {
   RevocationRepository,
   SecurityEvent,
   SecurityEventRepository,
+  TrialRepository,
 } from "../../application/ports.js";
 import type { Pool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -92,8 +94,9 @@ export class PgProductRepository implements ProductRepository {
   constructor(private readonly pool: Pool) {}
   async create(p: Product): Promise<void> {
     await this.pool.query(
-      "INSERT INTO products (id, key, name, created_at) VALUES ($1,$2,$3,$4)",
-      [p.id, p.key, p.name, p.createdAt],
+      `INSERT INTO products (id, key, name, created_at, trial_enabled, trial_days, trial_edition, trial_features)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`,
+      [p.id, p.key, p.name, p.createdAt, p.trial.enabled, p.trial.days, p.trial.edition, JSON.stringify(p.trial.features)],
     );
   }
   async get(id: string): Promise<Product | null> {
@@ -109,7 +112,18 @@ export class PgProductRepository implements ProductRepository {
     return rows.map((r) => this.map(r));
   }
   private map(r: Record<string, unknown>): Product {
-    return { id: r.id as string, key: r.key as string, name: r.name as string, createdAt: Number(r.created_at) };
+    return {
+      id: r.id as string,
+      key: r.key as string,
+      name: r.name as string,
+      createdAt: Number(r.created_at),
+      trial: {
+        enabled: Boolean(r.trial_enabled),
+        days: Number(r.trial_days ?? 14),
+        edition: (r.trial_edition as string) ?? "trial",
+        features: (r.trial_features as string[]) ?? [],
+      },
+    };
   }
 }
 
@@ -413,6 +427,33 @@ export class PgRevocationRepository implements RevocationRepository {
     const { rows } = await this.pool.query("SELECT * FROM revocations WHERE license_id=$1", [licenseId]);
     const r = rows[0];
     return r ? { licenseId: r.license_id, reason: r.reason, revokedAt: Number(r.revoked_at) } : null;
+  }
+}
+
+export class PgTrialRepository implements TrialRepository {
+  constructor(private readonly pool: Pool) {}
+  async create(t: TrialRecord): Promise<boolean> {
+    try {
+      await this.pool.query(
+        "INSERT INTO trials (id, product_id, license_id, device_id, created_at) VALUES ($1,$2,$3,$4,$5)",
+        [t.id, t.productId, t.licenseId, t.deviceId, t.createdAt],
+      );
+      return true;
+    } catch (e) {
+      // The UNIQUE (product_id, device_id) constraint is the atomic guard.
+      if ((e as { code?: string }).code === UNIQUE_VIOLATION) return false;
+      throw e;
+    }
+  }
+  async findByProductAndDevice(productId: string, deviceId: string): Promise<TrialRecord | null> {
+    const { rows } = await this.pool.query(
+      "SELECT * FROM trials WHERE product_id=$1 AND device_id=$2",
+      [productId, deviceId],
+    );
+    const r = rows[0];
+    return r
+      ? { id: r.id, productId: r.product_id, licenseId: r.license_id, deviceId: r.device_id, createdAt: Number(r.created_at) }
+      : null;
   }
 }
 
