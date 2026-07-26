@@ -125,6 +125,17 @@ Health/readiness endpoints: `/health`, `/ready`. Full runbook incl. key
 ceremony, environment checklist, and rotation: `docs/deployment.md`.
 Still planned: OpenTelemetry metrics/traces/dashboards.
 
+### Known limitation: floating installs share the concurrent-seat cap
+
+`/floating/checkout` now requires a device-bound token, which a device only gets
+by activating. Because `activate()` enforces `maximumSeats` on ACTIVATIONS, a
+floating license with N concurrent seats currently also caps installs at N —
+whereas the usual floating model is "many installs, N concurrent". Closing the
+seat-exhaustion hole made this pre-existing overload of `maximumSeats` visible.
+The clean fix is a separate install cap (or exempting floating activations from
+the concurrent budget); it is a deliberate product decision, not a code detail,
+so it is flagged rather than silently changed.
+
 ## 8. Implemented vs. planned
 
 | Area | Status |
@@ -142,7 +153,7 @@ Still planned: OpenTelemetry metrics/traces/dashboards.
 | OIDC auth (Entra ID/Keycloak) behind auth port | ✅ RS256 JWT + JWKS + role mapping, resolver-selectable via AUTH_MODE (API-key resolver remains for dev) |
 | Customer portal (React SPA) + scoped API | ✅ view licenses/features/dates, seat usage, view + deactivate devices, download license file, request reset; strict per-customer isolation + tests |
 | Device transfer (via self-service deactivation freeing a seat) | ✅ deactivation frees a seat; full transfer UX ⏳ |
-| Floating/concurrent licenses (atomic checkout, heartbeat, return, expiry reclaim) | ✅ implemented + tested (incl. concurrent cap enforcement over Postgres); admin monitoring + SDK |
+| Floating/concurrent licenses (atomic checkout, heartbeat, return, expiry reclaim) | ✅ implemented + tested (incl. concurrent cap enforcement over Postgres); admin monitoring + SDK. Checkout requires proof-of-possession — see the install-cap note below |
 | Offline activation (signed request/response files, device-bound, air-gapped) | ✅ implemented + tested; idempotent/replay-safe; SDK generate/import |
 | Rate limiting + security-event logging (per-IP fixed window, 429, security_events table) | ✅ baseline (per-instance; shared-store limiter ⏳) |
 | SDK-initiated deactivation (proof-of-possession token, frees the seat) | ✅ implemented + tested |

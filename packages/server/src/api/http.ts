@@ -9,11 +9,17 @@
  */
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
-import { hashDeviceBinding, verifyLicenseToken } from "@vehiclevo/licensing-shared";
+import {
+  hashDeviceBinding,
+  verifyLicenseToken,
+  type OfflineRequestFile,
+} from "@vehiclevo/licensing-shared";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { permissionsForRole, roleHasPermission, type Permission } from "../domain/rbac.js";
 import { FixedWindowRateLimiter } from "../infrastructure/rate-limiter.js";
+import { S } from "./schemas.js";
 import type { Principal, CustomerPrincipal } from "../application/auth.js";
+import type { CreateLicenseInput } from "../application/licensing-service.js";
 import type { Container } from "../container.js";
 
 const HTTP_FOR_CODE: Record<DomainErrorCode, number> = {
@@ -45,6 +51,10 @@ export function buildHttpServer(container: Container): FastifyInstance {
   const app = Fastify({
     // Structured logs; never log tokens/codes/secrets (we only log ids/status).
     logger: { level: container.config.env === "development" ? "info" : "warn" },
+    // Behind a load balancer every request otherwise carries the LB's IP, which
+    // would collapse all callers into ONE rate-limit bucket. Configure
+    // TRUST_PROXY (true | hop count | CIDR list) to use X-Forwarded-For.
+    trustProxy: container.config.trustProxy,
   });
 
   // Tolerate empty bodies on JSON requests: bodyless POSTs (e.g. /resume) must
@@ -91,6 +101,48 @@ export function buildHttpServer(container: Container): FastifyInstance {
     }
   };
 
+  /**
+   * Authenticate a client request by proof-of-possession of a signed license
+   * token bound to the calling device.
+   *
+   * An EXPIRED token is still accepted: possession is what is being proven, and
+   * refreshing an expiring token is exactly what /validate is for. What must
+   * hold is the signature, the issuer/audience, and — critically — that the
+   * token is bound to the device making the claim. Unbound (null-binding)
+   * tokens are rejected outright: they would otherwise act as a wildcard over
+   * every device on the license.
+   */
+  const requireTokenProof = (
+    req: FastifyRequest,
+    token: string | undefined,
+    deviceId: string | undefined,
+    surface: string,
+  ) => {
+    if (!token || !deviceId) {
+      throw new DomainError("VALIDATION", "token and deviceId are required");
+    }
+    const r = verifyLicenseToken(token, container.keyProvider.publicKeyStore(), {
+      expectedAudience: container.config.tokenAudience,
+      expectedIssuer: container.config.tokenIssuer,
+      clock: container.clock,
+    });
+    const signatureValid =
+      r.claims !== undefined &&
+      !["bad_signature", "unknown_key", "malformed", "wrong_audience", "wrong_issuer"].includes(
+        r.status,
+      );
+    if (!signatureValid) {
+      recordSecurityEvent("auth_failed", req.ip, { surface });
+      throw httpError(401, "invalid license token");
+    }
+    const claims = r.claims!;
+    if (claims.deviceBinding !== hashDeviceBinding(deviceId)) {
+      recordSecurityEvent("device_binding_mismatch", req.ip, { surface });
+      throw httpError(403, "token is not bound to this device");
+    }
+    return claims;
+  };
+
   // Authenticate a request to a Principal (401 if unknown / unconfigured).
   const authenticate = async (req: FastifyRequest): Promise<Principal> => {
     if (!container.principals.isConfigured()) {
@@ -116,12 +168,21 @@ export function buildHttpServer(container: Container): FastifyInstance {
     return principal;
   };
 
-  // CORS for the admin SPA (dev serves it on a different origin). The allowed
-  // origin is configurable; credentials are sent via Authorization header, not
-  // cookies, so we do not need Allow-Credentials.
-  const allowedOrigin = process.env.ADMIN_WEB_ORIGIN ?? "*";
+  // CORS for the SPAs. Both portals are separate origins (admin and customer
+  // run on different hosts/ports), so the allow-list carries both. We echo only
+  // an allow-listed origin — never the caller's arbitrary Origin. Credentials
+  // travel in the Authorization header, not cookies, so no Allow-Credentials.
+  const allowedOrigins = [container.config.adminWebOrigin, container.config.customerWebOrigin]
+    .filter((o): o is string => Boolean(o));
+  const wildcard = allowedOrigins.includes("*");
   app.addHook("onRequest", async (req, reply) => {
-    reply.header("access-control-allow-origin", allowedOrigin);
+    const origin = req.headers.origin;
+    if (wildcard) {
+      reply.header("access-control-allow-origin", "*");
+    } else if (origin && allowedOrigins.includes(origin)) {
+      reply.header("access-control-allow-origin", origin);
+      reply.header("vary", "Origin");
+    }
     reply.header("access-control-allow-methods", "GET,POST,OPTIONS");
     reply.header("access-control-allow-headers", "authorization,content-type");
     if (req.method === "OPTIONS") {
@@ -139,13 +200,15 @@ export function buildHttpServer(container: Container): FastifyInstance {
     const message =
       status === 500 ? "internal error" : (err as { message?: string }).message ?? "error";
     const code =
-      status === 401
-        ? "UNAUTHORIZED"
-        : status === 403
-          ? "FORBIDDEN"
-          : status === 429
-            ? "RATE_LIMITED"
-            : "INTERNAL";
+      status === 400
+        ? "VALIDATION"
+        : status === 401
+          ? "UNAUTHORIZED"
+          : status === 403
+            ? "FORBIDDEN"
+            : status === 429
+              ? "RATE_LIMITED"
+              : "INTERNAL";
     return reply.code(status).send({ error: { code, message } });
   });
 
@@ -177,7 +240,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   // --- Admin: products ---
-  app.post("/api/v1/admin/products", async (req, reply) => {
+  app.post("/api/v1/admin/products", { schema: { body: S.createProduct } }, async (req, reply) => {
     const principal = await authorize(req, "product:write");
     const body = req.body as { key: string; name: string };
     const product = await container.service.createProduct(body, principal.subject);
@@ -185,13 +248,13 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   // --- Admin: licenses ---
-  app.post("/api/v1/admin/licenses", async (req, reply) => {
+  app.post("/api/v1/admin/licenses", { schema: { body: S.createLicense } }, async (req, reply) => {
     const principal = await authorize(req, "license:create");
-    const license = await container.service.createLicense(req.body as never, principal.subject);
+    const license = await container.service.createLicense(req.body as CreateLicenseInput, principal.subject);
     return reply.code(201).send(license);
   });
 
-  app.post("/api/v1/admin/licenses/:id/activation-codes", async (req, reply) => {
+  app.post("/api/v1/admin/licenses/:id/activation-codes", { schema: { body: S.generateActivationCode } }, async (req, reply) => {
     const principal = await authorize(req, "activation:issue");
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { maxActivations?: number };
@@ -204,7 +267,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
     return reply.code(201).send({ activationCode, activationCodeId: record.id });
   });
 
-  app.post("/api/v1/admin/licenses/:id/revoke", async (req, reply) => {
+  app.post("/api/v1/admin/licenses/:id/revoke", { schema: { body: S.reason } }, async (req, reply) => {
     const principal = await authorize(req, "license:revoke");
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { reason?: string };
@@ -212,7 +275,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
     return reply.code(204).send();
   });
 
-  app.post("/api/v1/admin/licenses/:id/suspend", async (req, reply) => {
+  app.post("/api/v1/admin/licenses/:id/suspend", { schema: { body: S.reason } }, async (req, reply) => {
     const principal = await authorize(req, "license:manage");
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { reason?: string };
@@ -231,7 +294,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
     return reply.send(license);
   });
 
-  app.post("/api/v1/admin/licenses/:id/renew", async (req, reply) => {
+  app.post("/api/v1/admin/licenses/:id/renew", { schema: { body: S.renew } }, async (req, reply) => {
     const principal = await authorize(req, "license:manage");
     const { id } = req.params as { id: string };
     const body = req.body as { expiresAt: number | null; maintenanceExpiresAt?: number | null };
@@ -271,7 +334,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   // --- Client: activation ---
-  app.post("/api/v1/activate", async (req, reply) => {
+  app.post("/api/v1/activate", { schema: { body: S.activate } }, async (req, reply) => {
     enforceRateLimit(req, "activate");
     const body = req.body as { activationCode: string; deviceId: string; deviceLabel?: string };
     const { token, license } = await container.service.activate({
@@ -283,16 +346,23 @@ export function buildHttpServer(container: Container): FastifyInstance {
   });
 
   // --- Client: online validation ---
-  app.post("/api/v1/validate", async (req, reply) => {
+  app.post("/api/v1/validate", { schema: { body: S.validate } }, async (req, reply) => {
     enforceRateLimit(req, "validate");
-    const body = req.body as { licenseId: string; deviceId: string };
-    const result = await container.service.validate(body);
+    const body = req.body as { token: string; deviceId: string };
+    // Proof-of-possession: without this, anyone holding a copied licenseId +
+    // deviceId could mint fresh tokens forever. The licenseId is taken from the
+    // VERIFIED claims, never from the request body.
+    const claims = requireTokenProof(req, body.token, body.deviceId, "validate");
+    const result = await container.service.validate({
+      licenseId: claims.licenseId,
+      deviceId: body.deviceId,
+    });
     const code = result.status === "valid" ? 200 : 403;
     return reply.code(code).send(result);
   });
 
   // --- Client: self-service trial ---
-  app.post("/api/v1/trial/start", async (req, reply) => {
+  app.post("/api/v1/trial/start", { schema: { body: S.trialStart } }, async (req, reply) => {
     enforceRateLimit(req, "trial");
     const body = req.body as { productKey: string; deviceId: string; deviceLabel?: string };
     const { token, license } = await container.service.startTrial({
@@ -311,35 +381,12 @@ export function buildHttpServer(container: Container): FastifyInstance {
   // --- Client: deactivation (SDK-initiated seat release) ---
   // Authenticated by proof-of-possession: the caller must present a validly
   // SIGNED license token for the license it wants to deactivate a device on.
-  app.post("/api/v1/deactivate", async (req, reply) => {
+  app.post("/api/v1/deactivate", { schema: { body: S.deactivate } }, async (req, reply) => {
     enforceRateLimit(req, "deactivate");
-    const body = req.body as { token?: string; deviceId?: string };
-    if (!body?.token || !body?.deviceId) {
-      throw new DomainError("VALIDATION", "token and deviceId are required");
-    }
-    const r = verifyLicenseToken(body.token, container.keyProvider.publicKeyStore(), {
-      expectedAudience: container.config.tokenAudience,
-      expectedIssuer: container.config.tokenIssuer,
-      clock: container.clock,
-    });
-    // Accept any token whose SIGNATURE and iss/aud verify — an expired token is
-    // still valid proof of possession for releasing a seat.
-    const signatureValid =
-      r.claims !== undefined &&
-      !["bad_signature", "unknown_key", "malformed", "wrong_audience", "wrong_issuer"].includes(
-        r.status,
-      );
-    if (!signatureValid) {
-      recordSecurityEvent("auth_failed", req.ip, { surface: "deactivate" });
-      throw httpError(401, "invalid license token");
-    }
-    const claims = r.claims!;
-    if (
-      claims.deviceBinding !== null &&
-      claims.deviceBinding !== hashDeviceBinding(body.deviceId)
-    ) {
-      throw httpError(403, "token is not bound to this device");
-    }
+    const body = req.body as { token: string; deviceId: string };
+    // Binding is REQUIRED here: an unbound token would otherwise let its holder
+    // deactivate any device on the license (seat-denial DoS).
+    const claims = requireTokenProof(req, body.token, body.deviceId, "deactivate");
     await container.service.deactivateFromClient(claims.licenseId, body.deviceId);
     return reply.code(204).send();
   });
@@ -347,33 +394,36 @@ export function buildHttpServer(container: Container): FastifyInstance {
   // --- Client: offline activation (air-gapped) ---
   // Accepts a signed-request file, returns a signed-response file. Public like
   // /activate — the activation code in the request is the credential.
-  app.post("/api/v1/offline/response", async (req, reply) => {
+  app.post("/api/v1/offline/response", { schema: { body: S.offlineRequest } }, async (req, reply) => {
     enforceRateLimit(req, "offline");
-    const response = await container.service.generateOfflineResponse(req.body as never);
+    const response = await container.service.generateOfflineResponse(req.body as OfflineRequestFile);
     return reply
       .header("content-disposition", `attachment; filename="offline-response-${response.requestId}.json"`)
       .send(response);
   });
 
   // --- Client: floating (concurrent) seats ---
-  app.post("/api/v1/floating/checkout", async (req, reply) => {
+  app.post("/api/v1/floating/checkout", { schema: { body: S.floatingCheckout } }, async (req, reply) => {
     enforceRateLimit(req, "floating");
-    const body = req.body as { licenseId: string; deviceId: string; deviceLabel?: string };
+    const body = req.body as { token: string; deviceId: string; deviceLabel?: string };
+    // Without proof-of-possession, knowing a licenseId would be enough to
+    // consume every concurrent seat on it (seat-exhaustion DoS).
+    const claims = requireTokenProof(req, body.token, body.deviceId, "floating");
     const result = await container.service.checkoutSeat({
-      licenseId: body.licenseId,
+      licenseId: claims.licenseId,
       deviceId: body.deviceId,
       deviceLabel: body.deviceLabel ?? null,
     });
     return reply.send(result);
   });
 
-  app.post("/api/v1/floating/heartbeat", async (req, reply) => {
+  app.post("/api/v1/floating/heartbeat", { schema: { body: S.floatingLease } }, async (req, reply) => {
     enforceRateLimit(req, "floating");
     const body = req.body as { leaseId: string; deviceId: string };
     return reply.send(await container.service.heartbeatSeat(body));
   });
 
-  app.post("/api/v1/floating/return", async (req, reply) => {
+  app.post("/api/v1/floating/return", { schema: { body: S.floatingLease } }, async (req, reply) => {
     enforceRateLimit(req, "floating");
     const body = req.body as { leaseId: string; deviceId: string };
     await container.service.returnSeat(body);
@@ -417,7 +467,7 @@ export function buildHttpServer(container: Container): FastifyInstance {
     return reply.code(204).send();
   });
 
-  app.post("/api/v1/customer/licenses/:id/activation-reset", async (req, reply) => {
+  app.post("/api/v1/customer/licenses/:id/activation-reset", { schema: { body: S.activationReset } }, async (req, reply) => {
     const c = await authenticateCustomer(req);
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { note?: string };

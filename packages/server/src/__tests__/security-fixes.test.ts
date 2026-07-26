@@ -109,10 +109,28 @@ describe("security fixes", () => {
     });
   }
 
+  /** Client + its store, so a test can present the stored token as PoP. */
+  async function sdkWithStore(deviceId: string) {
+    const store = new InMemoryTokenStore();
+    const client = await LicensingClient.initialize({
+      expectedIssuer: ISSUER, expectedAudience: AUDIENCE, deviceId,
+      publicKeys: [{ kid: KID, pem: kp.publicKeyPem }],
+      http: sdkHttp(app), store, clock,
+    });
+    return { client, store };
+  }
+
+  const postValidate = (payload: object) =>
+    app.inject({
+      method: "POST", url: "/api/v1/validate",
+      headers: { "content-type": "application/json" }, payload,
+    });
+
   it("denies /validate to a device without an active activation (and SDK clears its cache)", async () => {
     const { licenseId, code } = await makeLicenseAndCode();
-    const client = await sdk("dev-val-1");
+    const { client, store } = await sdkWithStore("dev-val-1");
     await client.activate(code);
+    const token = (await store.load())!.token;
 
     // Sanity: validates fine while activated.
     expect((await client.validateLicense()).ok).toBe(true);
@@ -124,11 +142,9 @@ describe("security fixes", () => {
     const activationId = detail.activations[0].id;
     await container.service.deactivateDevice("c", licenseId, activationId);
 
-    // The deactivated device must NOT receive a fresh token any more.
-    const res = await app.inject({
-      method: "POST", url: "/api/v1/validate", headers: { "content-type": "application/json" },
-      payload: { licenseId, deviceId: "dev-val-1" },
-    });
+    // Even holding a VALID, correctly-bound token, the deactivated device gets
+    // no fresh token any more.
+    const res = await postValidate({ token, deviceId: "dev-val-1" });
     expect(res.statusCode).toBe(403);
     expect(res.json().status).toBe("device_not_activated");
     expect(res.json().token).toBeUndefined();
@@ -140,14 +156,66 @@ describe("security fixes", () => {
     expect(client.hasFeature("f1")).toBe(false);
   });
 
-  it("a device that never activated gets no token from /validate", async () => {
+  it("/validate requires proof-of-possession: ids alone mint nothing", async () => {
     const { licenseId } = await makeLicenseAndCode();
+    // The pre-fix attack: licenseId + deviceId in a plain body.
+    const res = await postValidate({ licenseId, deviceId: "attacker" });
+    expect(res.statusCode).toBe(400); // schema rejects it outright
+    expect(res.json().error.code).toBe("VALIDATION");
+
+    // A syntactically valid but unsigned token is refused too.
+    const forged = await postValidate({ token: "aaaa.bbbb.cccc", deviceId: "attacker" });
+    expect(forged.statusCode).toBe(401);
+  });
+
+  it("a token bound to one device cannot validate as another (copied state file)", async () => {
+    const { code } = await makeLicenseAndCode(2);
+    const { client, store } = await sdkWithStore("dev-owner");
+    await client.activate(code);
+    const token = (await store.load())!.token;
+
+    // Copying license.json to another machine no longer works: online tokens
+    // are device-bound, so the binding check refuses the impostor.
+    const res = await postValidate({ token, deviceId: "dev-impostor" });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("FORBIDDEN");
+
+    // ...and the SDK on that machine denies locally as well.
+    const impostor = await LicensingClient.initialize({
+      expectedIssuer: ISSUER, expectedAudience: AUDIENCE, deviceId: "dev-impostor",
+      publicKeys: [{ kid: KID, pem: kp.publicKeyPem }],
+      http: sdkHttp(app), store: new InMemoryTokenStore(), clock,
+    });
+    await impostor["cfg"].store.save({
+      licenseId: "lic", deviceId: "dev-impostor", token, lastServerTime: clock.now(),
+    });
+    const snap = await impostor.validateLicense();
+    expect(snap.ok).toBe(false);
+    expect(impostor.hasFeature("f1")).toBe(false);
+  });
+
+  it("an unbound token cannot deactivate an arbitrary device (seat-denial DoS)", async () => {
+    const { licenseId, code } = await makeLicenseAndCode(2);
+    const { client } = await sdkWithStore("victim-device");
+    await client.activate(code);
+
+    // A customer-portal license file is deliberately NOT device-bound; it must
+    // not act as a wildcard over other devices' seats.
+    const unbound = (
+      await container.service.downloadLicenseFile("c", licenseId)
+    ).token;
     const res = await app.inject({
-      method: "POST", url: "/api/v1/validate", headers: { "content-type": "application/json" },
-      payload: { licenseId, deviceId: "never-activated" },
+      method: "POST", url: "/api/v1/deactivate",
+      headers: { "content-type": "application/json" },
+      payload: { token: unbound, deviceId: "victim-device" },
     });
     expect(res.statusCode).toBe(403);
-    expect(res.json().status).toBe("device_not_activated");
+
+    // The victim's seat is untouched.
+    const detail = (
+      await app.inject({ method: "GET", url: `/api/v1/admin/licenses/${licenseId}`, headers: adminH })
+    ).json();
+    expect(detail.activations.filter((a: { status: string }) => a.status === "active")).toHaveLength(1);
   });
 
   it("SDK deactivate() releases the seat server-side so another device can activate", async () => {
@@ -178,6 +246,43 @@ describe("security fixes", () => {
     expect(events.some((e) => e.type === "auth_failed" && e.metadata.surface === "deactivate")).toBe(true);
   });
 
+  it("floating checkout requires proof-of-possession (seat-exhaustion DoS)", async () => {
+    const licenseId = (
+      await app.inject({
+        method: "POST", url: "/api/v1/admin/licenses", headers: adminH,
+        payload: {
+          customerId: "c", productId, edition: "pro", enabledFeatures: ["f1"],
+          licenseType: "floating", maximumSeats: 2,
+        },
+      })
+    ).json().id as string;
+    const code = (
+      await app.inject({
+        method: "POST", url: `/api/v1/admin/licenses/${licenseId}/activation-codes`,
+        headers: adminH, payload: { maxActivations: 5 },
+      })
+    ).json().activationCode as string;
+
+    const { client, store } = await sdkWithStore("float-owner");
+    await client.activate(code);
+    const token = (await store.load())!.token;
+
+    const checkout = (payload: object) =>
+      app.inject({
+        method: "POST", url: "/api/v1/floating/checkout",
+        headers: { "content-type": "application/json" }, payload,
+      });
+
+    // Knowing the licenseId is no longer enough to burn concurrent seats.
+    expect((await checkout({ licenseId, deviceId: "leech" })).statusCode).toBe(400);
+    // Nor is holding someone else's token.
+    expect((await checkout({ token, deviceId: "leech" })).statusCode).toBe(403);
+    // The legitimate holder still checks out normally.
+    const ok = await checkout({ token, deviceId: "float-owner" });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().seatsUsed).toBe(1);
+  });
+
   it("records auth_failed on a bad admin key", async () => {
     await app.inject({ method: "GET", url: "/api/v1/admin/licenses", headers: { authorization: "Bearer wrong" } });
     const events = (container.securityEvents as InMemorySecurityEventRepository).events;
@@ -197,10 +302,9 @@ describe("security fixes", () => {
     // RATE_LIMIT_MAX=8 for group "validate" per ip; burn through it.
     let limited = 0;
     for (let i = 0; i < 15; i++) {
-      const res = await app.inject({
-        method: "POST", url: "/api/v1/validate", headers: { "content-type": "application/json" },
-        payload: { licenseId: "lic_none", deviceId: "d" },
-      });
+      // Schema-valid so the request reaches the rate limiter (schema rejection
+      // would 400 before the handler runs); PoP then fails with 401.
+      const res = await postValidate({ token: "aaaa.bbbb.cccc", deviceId: "d" });
       if (res.statusCode === 429) {
         limited++;
         expect(res.json().error.code).toBe("RATE_LIMITED");

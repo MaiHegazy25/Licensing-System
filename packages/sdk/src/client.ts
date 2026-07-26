@@ -113,6 +113,8 @@ export class LicensingClient {
   private readonly clock: Clock;
   private readonly keyStore: PublicKeyStore;
   private lease: FloatingSeatHandle | null = null;
+  /** Token the current snapshot was derived from (for live re-evaluation). */
+  private lastToken: string | null = null;
   private last: LicenseSnapshot = DENIED(
     "not_activated",
     LicensingErrorCode.NotActivated,
@@ -138,7 +140,10 @@ export class LicensingClient {
     }
     const client = new LicensingClient(cfg);
     const state = await cfg.store.load();
-    if (state) client.last = client.evaluateOffline(state);
+    if (state) {
+      client.lastToken = state.token;
+      client.last = client.evaluateOffline(state);
+    }
     return client;
   }
 
@@ -166,6 +171,7 @@ export class LicensingClient {
       lastServerTime: claims.issuedAt,
     };
     await this.cfg.store.save(state);
+    this.lastToken = body.token;
     this.last = this.snapshotFromToken(body.token, "online")!;
     return this.last;
   }
@@ -201,6 +207,7 @@ export class LicensingClient {
       lastServerTime: claims.issuedAt,
     };
     await this.cfg.store.save(state);
+    this.lastToken = body.token;
     this.last = this.snapshotFromToken(body.token, "online")!;
     return this.last;
   }
@@ -226,6 +233,7 @@ export class LicensingClient {
       }
     }
     await this.cfg.store.clear();
+    this.lastToken = null;
     this.last = DENIED("not_activated", LicensingErrorCode.NotActivated, "none", false);
   }
 
@@ -272,6 +280,7 @@ export class LicensingClient {
       lastServerTime: claims.issuedAt,
     };
     await this.cfg.store.save(state);
+    this.lastToken = response.token;
     this.last = this.snapshotFromToken(response.token, "offline_cache")!;
     return this.last;
   }
@@ -284,19 +293,30 @@ export class LicensingClient {
   async validateLicense(): Promise<LicenseSnapshot> {
     const state = await this.cfg.store.load();
     if (!state) {
+      this.lastToken = null;
       this.last = DENIED("not_activated", LicensingErrorCode.NotActivated, "none", false);
       return this.last;
     }
 
     try {
+      // Proof-of-possession: send the signed token itself, not just ids. The
+      // server derives the licenseId from the verified claims.
       const res = await this.cfg.http.post("/api/v1/validate", {
-        licenseId: state.licenseId,
+        token: state.token,
         deviceId: state.deviceId,
       });
       const body = res.body as {
-        status: string;
+        status?: string;
         token?: string;
+        error?: { code?: string };
       };
+      if (body.error) {
+        // The server refused the token (bad signature / not bound to this
+        // device). Cached entitlements are unusable — deny, do not fall back.
+        this.lastToken = null;
+        this.last = DENIED("invalid", LicensingErrorCode.InvalidToken);
+        return this.last;
+      }
       if (res.status === 200 && body.token) {
         const claims = this.verifyOrThrow(body.token);
         const next: StoredState = {
@@ -305,20 +325,24 @@ export class LicensingClient {
           lastServerTime: Math.max(state.lastServerTime, claims.issuedAt),
         };
         await this.cfg.store.save(next);
+        this.lastToken = body.token;
         this.last = this.snapshotFromToken(body.token, "online")!;
         return this.last;
       }
       // Explicit negative verdicts from the server are authoritative.
       if (body.status === "revoked") {
         await this.cfg.store.clear();
+        this.lastToken = null;
         this.last = DENIED("revoked", LicensingErrorCode.Revoked);
         return this.last;
       }
       if (body.status === "suspended") {
+        this.lastToken = null;
         this.last = DENIED("suspended", LicensingErrorCode.Suspended);
         return this.last;
       }
       if (body.status === "expired") {
+        this.lastToken = null;
         this.last = DENIED("expired", LicensingErrorCode.Expired);
         return this.last;
       }
@@ -326,34 +350,74 @@ export class LicensingClient {
         // The server says this device holds no active seat (deactivated via a
         // portal, or reset). Clear the stale cache — do NOT fall back offline.
         await this.cfg.store.clear();
+        this.lastToken = null;
         this.last = DENIED("not_activated", LicensingErrorCode.NotActivated, "none", false);
         return this.last;
       }
       // Unknown non-200 → treat as network-ish and fall back offline.
+      this.lastToken = state.token;
       this.last = this.evaluateOffline(state);
       return this.last;
     } catch {
       // Network failure: do NOT block a legitimate user — fall back to the
       // cached signed token within its offline window.
+      this.lastToken = state.token;
       this.last = this.evaluateOffline(state);
       return this.last;
     }
   }
 
-  /** hasFeature(featureCode) — re-checks entitlement, never trusts a stale "ok". */
+  /**
+   * hasFeature(featureCode) — re-checks entitlement against the CURRENT clock,
+   * never trusting a stale "ok". A long-running process that validated hours
+   * ago must not keep paid features enabled past the token's expiry.
+   */
   hasFeature(featureCode: string): boolean {
-    if (!this.last.ok) return false;
-    return this.last.features.includes(featureCode);
+    const snap = this.currentSnapshot();
+    if (!snap.ok) return false;
+    return snap.features.includes(featureCode);
   }
 
-  /** getLicenseStatus() */
+  /** getLicenseStatus() — re-evaluated against the current clock. */
   getLicenseStatus(): LicenseSnapshot {
-    return this.last;
+    return this.currentSnapshot();
   }
 
   /** getOfflineDaysRemaining() */
   getOfflineDaysRemaining(): number {
-    return this.last.offlineDaysRemaining;
+    return this.currentSnapshot().offlineDaysRemaining;
+  }
+
+  /**
+   * Re-derive the snapshot from the cached token at the current time.
+   *
+   * This only ever moves in the FAIL-SAFE direction: it can turn an "ok" into a
+   * denial (expiry, grace elapsed, offline window exceeded, device mismatch),
+   * but never upgrades a denial — an authoritative server verdict (revoked /
+   * suspended) or a cleared cache stays denied until the next validateLicense().
+   */
+  private currentSnapshot(): LicenseSnapshot {
+    if (!this.last.ok || !this.lastToken) return this.last;
+    const source = this.last.source === "online" ? "online" : "offline_cache";
+    const fresh = this.snapshotFromToken(this.lastToken, source);
+    if (!fresh) {
+      this.last = DENIED("invalid", LicensingErrorCode.InvalidToken, source);
+      return this.last;
+    }
+    if (fresh.ok && source === "offline_cache") {
+      // Running from cache also has to respect the offline window.
+      const claims = this.safeClaims(this.lastToken);
+      if (claims?.offlineUntil != null && this.clock.now() > claims.offlineUntil) {
+        this.last = DENIED(
+          "offline_exceeded",
+          LicensingErrorCode.OfflinePeriodExceeded,
+          source,
+        );
+        return this.last;
+      }
+    }
+    this.last = fresh;
+    return fresh;
   }
 
   /**
@@ -369,7 +433,8 @@ export class LicensingClient {
     let res;
     try {
       res = await this.cfg.http.post("/api/v1/floating/checkout", {
-        licenseId: state.licenseId,
+        // Proof-of-possession, as for /validate and /deactivate.
+        token: state.token,
         deviceId: state.deviceId,
         deviceLabel: this.cfg.deviceLabel ?? null,
       });
@@ -395,6 +460,7 @@ export class LicensingClient {
       lastServerTime: Math.max(state.lastServerTime, this.clock.now()),
     };
     await this.cfg.store.save(next);
+    this.lastToken = body.token;
     this.last = this.snapshotFromToken(body.token, "online")!;
     this.lease = { leaseId: body.leaseId, expiresAt: body.expiresAt };
     return {
