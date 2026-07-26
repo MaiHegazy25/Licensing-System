@@ -405,9 +405,12 @@ export function buildHttpServer(container: Container): FastifyInstance {
   // --- Client: floating (concurrent) seats ---
   app.post("/api/v1/floating/checkout", { schema: { body: S.floatingCheckout } }, async (req, reply) => {
     enforceRateLimit(req, "floating");
-    const body = req.body as { licenseId: string; deviceId: string; deviceLabel?: string };
+    const body = req.body as { token: string; deviceId: string; deviceLabel?: string };
+    // Without proof-of-possession, knowing a licenseId would be enough to
+    // consume every concurrent seat on it (seat-exhaustion DoS).
+    const claims = requireTokenProof(req, body.token, body.deviceId, "floating");
     const result = await container.service.checkoutSeat({
-      licenseId: body.licenseId,
+      licenseId: claims.licenseId,
       deviceId: body.deviceId,
       deviceLabel: body.deviceLabel ?? null,
     });

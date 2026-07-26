@@ -114,10 +114,11 @@ export const S = {
     properties: { productKey: str(100), deviceId, deviceLabel: nullableStr(200) },
   },
 
+  /** Proof-of-possession: licenseId comes from the verified token, not the body. */
   floatingCheckout: {
     type: "object",
-    required: ["licenseId", "deviceId"],
-    properties: { licenseId: str(200), deviceId, deviceLabel: nullableStr(200) },
+    required: ["token", "deviceId"],
+    properties: { token: licenseToken, deviceId, deviceLabel: nullableStr(200) },
   },
 
   floatingLease: {

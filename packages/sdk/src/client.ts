@@ -433,7 +433,8 @@ export class LicensingClient {
     let res;
     try {
       res = await this.cfg.http.post("/api/v1/floating/checkout", {
-        licenseId: state.licenseId,
+        // Proof-of-possession, as for /validate and /deactivate.
+        token: state.token,
         deviceId: state.deviceId,
         deviceLabel: this.cfg.deviceLabel ?? null,
       });

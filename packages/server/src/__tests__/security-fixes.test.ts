@@ -246,6 +246,43 @@ describe("security fixes", () => {
     expect(events.some((e) => e.type === "auth_failed" && e.metadata.surface === "deactivate")).toBe(true);
   });
 
+  it("floating checkout requires proof-of-possession (seat-exhaustion DoS)", async () => {
+    const licenseId = (
+      await app.inject({
+        method: "POST", url: "/api/v1/admin/licenses", headers: adminH,
+        payload: {
+          customerId: "c", productId, edition: "pro", enabledFeatures: ["f1"],
+          licenseType: "floating", maximumSeats: 2,
+        },
+      })
+    ).json().id as string;
+    const code = (
+      await app.inject({
+        method: "POST", url: `/api/v1/admin/licenses/${licenseId}/activation-codes`,
+        headers: adminH, payload: { maxActivations: 5 },
+      })
+    ).json().activationCode as string;
+
+    const { client, store } = await sdkWithStore("float-owner");
+    await client.activate(code);
+    const token = (await store.load())!.token;
+
+    const checkout = (payload: object) =>
+      app.inject({
+        method: "POST", url: "/api/v1/floating/checkout",
+        headers: { "content-type": "application/json" }, payload,
+      });
+
+    // Knowing the licenseId is no longer enough to burn concurrent seats.
+    expect((await checkout({ licenseId, deviceId: "leech" })).statusCode).toBe(400);
+    // Nor is holding someone else's token.
+    expect((await checkout({ token, deviceId: "leech" })).statusCode).toBe(403);
+    // The legitimate holder still checks out normally.
+    const ok = await checkout({ token, deviceId: "float-owner" });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().seatsUsed).toBe(1);
+  });
+
   it("records auth_failed on a bad admin key", async () => {
     await app.inject({ method: "GET", url: "/api/v1/admin/licenses", headers: { authorization: "Bearer wrong" } });
     const events = (container.securityEvents as InMemorySecurityEventRepository).events;
