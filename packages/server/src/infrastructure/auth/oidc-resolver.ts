@@ -103,7 +103,10 @@ export class OidcPrincipalResolver implements PrincipalResolver {
     if (!aud.includes(this.cfg.audience)) return null;
 
     const now = this.now();
-    if (typeof claims.exp === "number" && now > claims.exp + this.tolerance) return null;
+    // `exp` is REQUIRED: treating it as optional would accept a token that
+    // never expires. A missing/!numeric exp is a reject, not a pass.
+    if (typeof claims.exp !== "number") return null;
+    if (now > claims.exp + this.tolerance) return null;
     if (typeof claims.nbf === "number" && now + this.tolerance < claims.nbf) return null;
     if (!claims.sub) return null;
 
@@ -140,7 +143,11 @@ export class OidcPrincipalResolver implements PrincipalResolver {
  */
 export class RemoteJwksProvider implements JwksKeyProvider {
   private cache = new Map<string, KeyObject>();
+  /** Last SUCCESSFUL refresh. Failures must not start the cooldown. */
   private lastFetch = 0;
+  /** Last failed attempt, for a short retry backoff (avoids hammering the IdP). */
+  private lastFailure = 0;
+  private static readonly FAILURE_BACKOFF_SECONDS = 10;
 
   constructor(
     private readonly jwksUri: string,
@@ -151,17 +158,32 @@ export class RemoteJwksProvider implements JwksKeyProvider {
 
   async getKey(kid: string): Promise<KeyObject | null> {
     if (this.cache.has(kid)) return this.cache.get(kid)!;
-    if (this.now() - this.lastFetch >= this.minRefreshSeconds) {
+    const now = this.now();
+    const cooledDown = now - this.lastFetch >= this.minRefreshSeconds;
+    const pastBackoff =
+      now - this.lastFailure >= RemoteJwksProvider.FAILURE_BACKOFF_SECONDS;
+    if (cooledDown && pastBackoff) {
       await this.refresh();
     }
     return this.cache.get(kid) ?? null;
   }
 
   private async refresh(): Promise<void> {
-    this.lastFetch = this.now();
-    const res = await this.fetchImpl(this.jwksUri);
-    if (!res.ok) return;
-    const body = (await res.json()) as { keys?: Array<Record<string, unknown>> };
+    let body: { keys?: Array<Record<string, unknown>> };
+    try {
+      const res = await this.fetchImpl(this.jwksUri);
+      if (!res.ok) {
+        // A transient JWKS failure must NOT start the refresh cooldown, or a
+        // single blip locks out every unknown kid for the full window. Record
+        // a short backoff instead so the next request retries.
+        this.lastFailure = this.now();
+        return;
+      }
+      body = (await res.json()) as { keys?: Array<Record<string, unknown>> };
+    } catch {
+      this.lastFailure = this.now();
+      return;
+    }
     const next = new Map<string, KeyObject>();
     for (const jwk of body.keys ?? []) {
       const kid = jwk.kid;
@@ -172,6 +194,9 @@ export class RemoteJwksProvider implements JwksKeyProvider {
         /* skip unusable key */
       }
     }
+    // Only a successful refresh starts the cooldown.
     this.cache = next;
+    this.lastFetch = this.now();
+    this.lastFailure = 0;
   }
 }

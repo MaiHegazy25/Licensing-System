@@ -123,6 +123,13 @@ describe("OidcPrincipalResolver", () => {
     expect(await resolver.resolve(signJwt(baseClaims({ roles: [] })))).toBeNull();
   });
 
+  it("rejects a token with NO exp claim (must not be eternally valid)", async () => {
+    const { exp: _dropped, ...noExp } = baseClaims();
+    expect(await resolver.resolve(signJwt(noExp))).toBeNull();
+    // A non-numeric exp is equally unacceptable.
+    expect(await resolver.resolve(signJwt(baseClaims({ exp: "9999999999" })))).toBeNull();
+  });
+
   it("rejects malformed tokens", async () => {
     expect(await resolver.resolve("not.a.jwt")).toBeNull();
     expect(await resolver.resolve(null)).toBeNull();
@@ -151,5 +158,28 @@ describe("RemoteJwksProvider", () => {
     const resolver = new OidcPrincipalResolver(provider, cfg);
     expect((await resolver.resolve(signJwt(baseClaims())))?.role).toBe("license_admin");
     expect(await provider.getKey("nope")).toBeNull();
+  });
+
+  it("a transient JWKS failure does not lock auth out for the refresh window", async () => {
+    const jwk = { ...(publicKey.export({ format: "jwk" }) as object), kid: KID, use: "sig", alg: "RS256" };
+    let attempt = 0;
+    let clock = NOW;
+    const fetchImpl = (async () => {
+      attempt++;
+      // First call fails (IdP blip), subsequent calls succeed.
+      if (attempt === 1) return new Response("upstream error", { status: 503 });
+      return new Response(JSON.stringify({ keys: [jwk] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const provider = new RemoteJwksProvider("https://idp/jwks", 300, () => clock, fetchImpl);
+    expect(await provider.getKey(KID)).toBeNull(); // the blip
+    // Previously the failed attempt started the 5-minute cooldown, locking out
+    // every unknown kid. After a short backoff the next lookup must retry.
+    clock += 11;
+    expect(await provider.getKey(KID)).toBeTruthy();
+    expect(attempt).toBe(2);
   });
 });

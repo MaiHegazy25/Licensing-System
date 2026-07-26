@@ -266,7 +266,11 @@ export class LicensingService {
       });
     }
 
-    const issued = await this.d.tokenIssuer.issue(license);
+    // Bind the token to this device: a copied token/state file is then useless
+    // on another machine (the SDK and /validate both enforce the binding).
+    const issued = await this.d.tokenIssuer.issue(license, {
+      deviceBinding: hashDeviceBinding(input.deviceId),
+    });
     return { token: issued.token, license };
   }
 
@@ -300,7 +304,9 @@ export class LicensingService {
     act.lastSeenAt = now;
     await this.d.activations.update(act);
 
-    const issued = await this.d.tokenIssuer.issue(license);
+    const issued = await this.d.tokenIssuer.issue(license, {
+      deviceBinding: hashDeviceBinding(input.deviceId),
+    });
     await this.d.audit.append({
       id: this.d.ids.next("evt"),
       type: "license.validated",
@@ -495,7 +501,12 @@ export class LicensingService {
     });
   }
 
-  /** Issue a downloadable signed license file (token) for an owned, live license. */
+  /**
+   * Issue a downloadable signed license file (token) for an owned, live license.
+   * NOT device-bound — no device is known at download time — so it is only an
+   * informational artifact with the short default TTL. Unbound tokens are
+   * rejected by /validate and /deactivate, which both require a binding match.
+   */
   async downloadLicenseFile(
     customerId: string,
     licenseId: string,
@@ -831,7 +842,9 @@ export class LicensingService {
     }
     const [seatsUsed, issued] = await Promise.all([
       this.d.floatingLeases.countActive(license.id, now),
-      this.d.tokenIssuer.issue(license),
+      this.d.tokenIssuer.issue(license, {
+        deviceBinding: hashDeviceBinding(input.deviceId),
+      }),
     ]);
     await this.d.audit.append({
       id: this.d.ids.next("evt"),

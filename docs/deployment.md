@@ -46,7 +46,8 @@ The app serves plain HTTP — **TLS terminates at your gateway/ingress**, always
 | `AUTH_MODE` | `oidc` |
 | `OIDC_ISSUER` / `OIDC_AUDIENCE` / `OIDC_JWKS_URI` / `OIDC_ROLE_CLAIM` / `OIDC_ROLE_MAP` | from the Entra registration; e.g. `OIDC_ROLE_MAP={"Licensing.Admin":"license_admin","Licensing.Audit":"auditor"}` |
 | `CUSTOMER_API_KEYS` | customer-portal access keys (customer OIDC/B2C resolver not yet built) |
-| `ADMIN_WEB_ORIGIN` | exact portal origin — wildcard is refused in production |
+| `ADMIN_WEB_ORIGIN` / `CUSTOMER_WEB_ORIGIN` | exact portal origins (each SPA has its own) — wildcard refused in production |
+| `TRUST_PROXY` | **required behind a load balancer** (`true`, a hop count, or CIDRs) — otherwise rate limiting keys on the balancer's IP and all callers share one bucket |
 | Tuning | `TOKEN_TTL_SECONDS`, `FLOATING_LEASE_TTL_SECONDS`, `OFFLINE_TOKEN_MAX_DAYS`, `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_SECONDS` |
 
 ## 3. Migrate, then roll

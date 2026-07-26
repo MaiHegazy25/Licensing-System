@@ -149,6 +149,22 @@ describe("SDK offline + security edges", () => {
     expect(client.hasFeature("export_pdf")).toBe(false);
   });
 
+  it("hasFeature() goes false at expiry WITHOUT another validateLicense()", async () => {
+    const kp = generateEd25519KeyPair();
+    const clock = new MutableClock(1_700_000_000);
+    // Token valid for one hour; offline window is much longer.
+    const token = await makeToken({ expiresAt: 1_700_000_000 + 3600 }, kp);
+    const net = scriptedHttp(token, "lic_1");
+    const client = await LicensingClient.initialize(baseCfg(kp, net.http, clock));
+    await client.activate("CODE");
+    expect(client.hasFeature("export_pdf")).toBe(true);
+
+    // A long-running process: no further validate call, just time passing.
+    clock.set(1_700_000_000 + 7200);
+    expect(client.hasFeature("export_pdf")).toBe(false);
+    expect(client.getLicenseStatus().ok).toBe(false);
+  });
+
   it("fails safe (features disabled) when not activated", async () => {
     const kp = generateEd25519KeyPair();
     const clock = new MutableClock(1_700_000_000);
