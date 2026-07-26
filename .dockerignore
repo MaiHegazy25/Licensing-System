@@ -1,0 +1,19 @@
+node_modules
+packages/*/node_modules
+packages/*/dist
+*.tsbuildinfo
+coverage
+
+# never bake secrets or key material into images
+.env
+.env.*
+*.pem
+*.key
+keys
+secrets
+
+.git
+.github
+docs
+*.md
+docker-compose.yml

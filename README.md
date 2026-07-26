@@ -272,3 +272,14 @@ See `packages/shared/src/token.ts` (`LicenseClaims`). Highlights: `schemaVersion
   tokens/codes/keys.
 
 See `docs/threat-model.md` for the full threat table and residual risks.
+
+## Deployment
+
+`Dockerfile` builds the production server image (multi-stage, non-root, SPAs
+deployed separately as static bundles). `.github/workflows/ci.yml` runs
+typecheck + both SPA builds + the full test suite against a real Postgres on
+every PR, and on `main` pushes the image to GHCR with an SPDX SBOM and a
+container vulnerability scan. `docker compose --profile app up` runs the full
+stack locally. The step-by-step production runbook — provisioning, the key
+ceremony, environment checklist, migrations, rotation — is
+`docs/deployment.md`.

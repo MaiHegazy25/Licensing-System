@@ -115,11 +115,15 @@ ER model in `docs/threat-model.md`/README. Concurrency: optimistic `version`
 columns for admin edits; floating-seat enforcement _(planned)_ uses row locks /
 conditional `UPDATE ... WHERE active < max`.
 
-## 7. Deployment _(planned detail)_
+## 7. Deployment
 
-Containerized; separate dev/staging/prod config; DB migrations on release;
-OpenTelemetry traces/metrics/logs (no secrets, no raw tokens); health/readiness
-endpoints exist today (`/health`, `/ready`).
+Containerized (`Dockerfile`, multi-stage, non-root; SPAs deployed as static
+bundles). CI (`.github/workflows/ci.yml`) tests against real Postgres, pushes
+the image to GHCR with an SPDX SBOM and a container vulnerability scan.
+Migrations apply on startup (single instance) or as a release step (replicas).
+Health/readiness endpoints: `/health`, `/ready`. Full runbook incl. key
+ceremony, environment checklist, and rotation: `docs/deployment.md`.
+Still planned: OpenTelemetry metrics/traces/dashboards.
 
 ## 8. Implemented vs. planned
 
@@ -143,5 +147,5 @@ endpoints exist today (`/health`, `/ready`).
 | Rate limiting + security-event logging (per-IP fixed window, 429, security_events table) | ✅ baseline (per-instance; shared-store limiter ⏳) |
 | SDK-initiated deactivation (proof-of-possession token, frees the seat) | ✅ implemented + tested |
 | Trial licenses (self-service start, per-product policy, one-per-device guard, device-bound tokens) | ✅ implemented + tested (incl. Postgres uniqueness race) |
-| Usage reporting/monitoring | ⏳ planned |
-| Reporting, key rotation runbook, monitoring | ⏳ planned (P6) |
+| Containerization (Dockerfile) + CI/CD (test w/ Postgres, image → GHCR, SBOM, vuln scan) + deployment runbook | ✅ (deploy job left to operator credentials — see docs/deployment.md §7) |
+| Usage reporting/monitoring (metrics/tracing/dashboards) | ⏳ planned |
